@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Command Center — macbook · hermes · acer</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">◈</span>
+      <div>
+        <h1>Command Center</h1>
+        <p class="sub">macbook · hermes · acer</p>
+      </div>
+    </div>
+    <div class="summary-strip" id="summary"></div>
+    <div class="topbar-right">
+      <span id="last-updated" class="muted"></span>
+      <label class="toggle" title="auto-refresh every 15s">
+        <input type="checkbox" id="auto-refresh" checked>
+        <span>auto</span>
+      </label>
+      <button id="btn-refresh" class="btn" title="refresh now">⟳</button>
+      <button id="btn-alerts" class="btn ghost" title="alerts">⚠ <span id="alert-count"></span></button>
+      <button id="btn-audit" class="btn ghost" title="audit log">Audit</button>
+    </div>
+  </header>
+
+  <div id="alert-banner" class="alert-banner" hidden></div>
+
+  <div class="toolbar">
+    <input id="global-search" type="search" placeholder="filter services, containers, jobs, projects…" autocomplete="off">
+    <button id="btn-collapse" class="btn ghost small">collapse all</button>
+  </div>
+
+  <div id="fleet" class="fleet"></div>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <!-- drawers -->
+  <div class="drawer" id="audit-drawer" hidden>
+    <div class="drawer-head"><h2>Control audit log</h2><button class="btn ghost small drawer-close">✕</button></div>
+    <table class="tbl"><thead><tr><th>time</th><th>host</th><th>action</th><th>cmd</th><th>rc</th></tr></thead><tbody id="audit-body"></tbody></table>
+  </div>
+
+  <div class="drawer" id="alerts-drawer" hidden>
+    <div class="drawer-head"><h2>Active alerts</h2><button class="btn ghost small drawer-close">✕</button></div>
+    <div id="alerts-body"></div>
+  </div>
+
+  <div class="drawer" id="logs-drawer" hidden>
+    <div class="drawer-head">
+      <h2 id="logs-title">Logs</h2>
+      <div class="logs-actions">
+        <button id="btn-logs-refresh" class="btn ghost small">⟳</button>
+        <button id="btn-logs-close" class="btn ghost small">✕</button>
+      </div>
+    </div>
+    <pre id="logs-body" class="log-view"></pre>
+  </div>
+
+  <footer class="foot muted">
+    Command Center · stdlib Python + vanilla JS (zero deps) · allowlisted &amp; audited control ·
+    optional token auth · binds 127.0.0.1
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

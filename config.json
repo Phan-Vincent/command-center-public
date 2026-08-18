@@ -1,0 +1,157 @@
+{
+  "_comment": "Command Center config. Hosts = the three systems in the fleet. Actions = allowlisted control surface (executed over ssh as the SSH user, no sudo). Links = web endpoints reachable from this MacBook.",
+  "hosts": {
+    "macbook": {
+      "name": "macbook",
+      "label": "MacBook (command center)",
+      "role": "primary",
+      "connect": "local",
+      "os_hint": "macOS",
+      "tailscale_ip": "100.64.0.3",
+      "projects": [
+        { "name": "Reel Clipper", "path": "~/Reel Clipper", "note": "Docker + Python video app" },
+        { "name": "Bodybuilding Auditor", "path": "~/Privacy-First-LLM-Driven-Bodybuilding-Auditor", "note": "Python audit pipeline" },
+        { "name": "openclaw", "path": "~/openclaw", "note": "OpenClaw runtime + workspace" },
+        { "name": "openclaw-source", "path": "~/openclaw-source", "note": "OpenClaw source checkout" },
+        { "name": "pinokio", "path": "~/pinokio", "note": "1-click app launcher" },
+        { "name": "acer-repo-rescue", "path": "~/acer-repo-rescue", "note": "restic repo rescue copy" }
+      ],
+      "agents": [
+        { "name": "openclaw gateway", "match": "openclaw", "port": 18789, "note": "local OpenClaw daemon" },
+        { "name": "ollama", "match": "ollama", "port": 11434, "note": "local LLM server" },
+        { "name": "kimi-webbridge", "match": "kimi-webbridge", "port": 10086, "note": "browser automation bridge" },
+        { "name": "kimi app", "match": "Kimi", "port": 51454, "note": "Kimi desktop app" }
+      ],
+      "links": [
+        { "label": "Ollama API", "url": "http://127.0.0.1:11434", "reach": "local" },
+        { "label": "OpenClaw gateway", "url": "http://127.0.0.1:18789", "reach": "local" }
+      ],
+      "actions": [
+        { "id": "macbook-openclaw-status", "label": "OpenClaw gateway status", "cmd": "pgrep -fl openclaw | head -5" },
+        { "id": "macbook-ollama-status", "label": "Ollama status", "cmd": "pgrep -fl ollama | head -5" }
+      ],
+      "exec": [
+        { "id": "mac-df", "label": "df -h", "cmd": "df -h", "arg": "none" },
+        { "id": "mac-mem", "label": "vm_stat", "cmd": "vm_stat | head -12", "arg": "none" },
+        { "id": "mac-top", "label": "top CPU", "cmd": "ps -Ao pid,pcpu,pmem,comm -r | head -10", "arg": "none" }
+      ]
+    },
+    "hermes": {
+      "name": "hermes",
+      "label": "hermes (peeruser-Dell)",
+      "role": "workstation",
+      "connect": "ssh",
+      "os_hint": "Ubuntu 24.04",
+      "tailscale_ip": "100.64.0.2",
+      "projects": [
+        { "name": "bezos-yacht-tracker", "path": "~/projects/bezos-yacht-tracker", "note": "KORU AIS tracker + content" },
+        { "name": "bezos-yacht-tracker-public", "path": "~/projects/bezos-yacht-tracker-public", "note": "public static map site" },
+        { "name": "pokemon-scanner", "path": "~/projects/pokemon-scanner", "note": "scanner repo + skill" },
+        { "name": "incogni-clone", "path": "~/projects/incogni-clone", "note": "incogni API clone" },
+        { "name": "hermes scripts", "path": "~/.hermes/scripts", "note": "pokemon PSA pipeline + bezos scripts" },
+        { "name": "cyber-intern-pipeline", "path": "~/cyber-intern-pipeline", "note": "JSearch daily scan" },
+        { "name": "broker_automation", "path": "~/.broker_automation", "note": "broker scheduler + reports" }
+      ],
+      "agents": [
+        { "name": "hermes gateway", "match": "hermes_cli.main gateway", "port": 8644, "note": "Hermes agent gateway" },
+        { "name": "discord handler", "match": "discord_interaction_handler", "port": 8655, "note": "pokemon scanner UI" },
+        { "name": "ngrok tunnel", "match": "ngrok", "port": 4040, "note": "public tunnel for 8655" },
+        { "name": "kimi-webbridge", "match": "kimi-webbridge", "port": 10086, "note": "browser automation" },
+        { "name": "codex", "match": "codex", "note": "codex app-server" }
+      ],
+      "links": [
+        { "label": "ngrok public (discord)", "url": "https://example-1.ngrok-free.dev", "reach": "public" },
+        { "label": "hermes webhook (LAN)", "url": "http://192.168.1.224:8644", "reach": "lan" },
+        { "label": "apache (tailscale)", "url": "http://100.64.0.2", "reach": "tailscale" }
+      ],
+      "actions": [
+        { "id": "hermes-probe-gateway", "label": "Probe gateway status", "cmd": "systemctl --user is-active hermes-gateway" },
+        { "id": "hermes-restart-gateway", "label": "Restart Hermes gateway", "cmd": "systemctl --user restart hermes-gateway" },
+        { "id": "hermes-restart-ngrok", "label": "Restart pokemon-ngrok", "cmd": "systemctl --user restart pokemon-ngrok" },
+        { "id": "hermes-restart-discord", "label": "Restart Discord handler", "cmd": "systemctl --user restart discord-interaction-handler" },
+        { "id": "hermes-restart-bezos", "label": "Restart Bezos tracker v2", "cmd": "systemctl --user restart bezos-yacht-tracker-v2" },
+        { "id": "hermes-start-kimi", "label": "Start Kimi WebBridge", "cmd": "systemctl --user start kimi-webbridge" },
+        { "id": "hermes-reboot", "label": "Reboot hermes", "cmd": "systemctl reboot", "disconnect_ok": true }
+      ],
+      "exec": [
+        { "id": "unit-status", "label": "systemctl status", "cmd": "systemctl --user status {arg} --no-pager", "arg": "unit" },
+        { "id": "unit-log", "label": "journalctl (unit)", "cmd": "journalctl --user -u {arg} -n 80 --no-pager", "arg": "unit" },
+        { "id": "container-log", "label": "docker logs", "cmd": "docker logs {arg} --tail 80 2>&1", "arg": "container" },
+        { "id": "df", "label": "df -h", "cmd": "df -h", "arg": "none" },
+        { "id": "free", "label": "free -h", "cmd": "free -h", "arg": "none" },
+        { "id": "uptime", "label": "uptime", "cmd": "uptime", "arg": "none" }
+      ]
+    },
+    "acer": {
+      "name": "acer",
+      "label": "acer (vphomelab)",
+      "role": "homelab",
+      "connect": "ssh",
+      "os_hint": "Ubuntu",
+      "tailscale_ip": "100.64.0.1",
+      "projects": [
+        { "name": "bezos-yacht-tracker", "path": "~/projects/bezos-yacht-tracker", "note": "KORU tracker + dashboard.py" },
+        { "name": "hermes agent", "path": "~/.hermes", "note": "Hermes profile (gateway, cron, kanban, skills)" },
+        { "name": "openclaw workspace", "path": "~/workspace", "note": "Bernard life-OS: kalshi, crypto, habits, dashboards" },
+        { "name": "immich", "path": "~/immich", "note": "photo stack (server/ML/postgres/redis)" },
+        { "name": "pihole", "path": "~/pihole", "note": "DNS + UI 8888" },
+        { "name": "nebula-sync", "path": "~/nebula-sync", "note": "gravity sync to replica 182" },
+        { "name": "restic-repo", "path": "~/restic-repo", "note": "encrypted backup repos" },
+        { "name": "cyber-intern-pipeline", "path": "~/cyber-intern-pipeline", "note": "JSearch daily scan" }
+      ],
+      "agents": [
+        { "name": "hermes gateway", "match": "hermes_cli.main gateway", "port": 8644, "note": "Hermes agent gateway" },
+        { "name": "discord handler", "match": "discord_interaction_handler", "port": 8655, "note": "pokemon scanner UI" },
+        { "name": "ngrok tunnel", "match": "ngrok", "port": 4040, "note": "public tunnel for 8655" },
+        { "name": "openclaw (Bernard)", "match": "openclaw", "note": "life-OS delegator (idle)" },
+        { "name": "codex", "match": "codex", "note": "codex app-server" }
+      ],
+      "links": [
+        { "label": "Immich", "url": "http://100.64.0.1:2283", "reach": "tailscale" },
+        { "label": "Wekan", "url": "http://100.64.0.1:8443", "reach": "tailscale" },
+        { "label": "Pi-hole admin", "url": "http://192.168.1.224:8888/admin", "reach": "lan" },
+        { "label": "ngrok public (discord)", "url": "https://example-2.ngrok-free.dev", "reach": "public" },
+        { "label": "hermes webhook (LAN)", "url": "http://192.168.1.224:8644", "reach": "lan" }
+      ],
+      "actions": [
+        { "id": "acer-probe-gateway", "label": "Probe gateway status", "cmd": "systemctl --user is-active hermes-gateway" },
+        { "id": "acer-restart-gateway", "label": "Restart Hermes gateway", "cmd": "systemctl --user restart hermes-gateway" },
+        { "id": "acer-restart-ngrok", "label": "Restart ngrok tunnel", "cmd": "systemctl --user restart ngrok-tunnel" },
+        { "id": "acer-restart-discord", "label": "Restart Discord handler", "cmd": "systemctl --user restart discord-interaction-handler" },
+        { "id": "acer-restart-immich", "label": "Restart Immich server", "cmd": "docker restart immich_server" },
+        { "id": "acer-restart-pihole", "label": "Restart Pi-hole", "cmd": "docker restart pihole" },
+        { "id": "acer-restart-nebula", "label": "Restart nebula-sync", "cmd": "docker restart nebula-sync" },
+        { "id": "acer-reboot", "label": "Reboot acer", "cmd": "systemctl reboot", "disconnect_ok": true }
+      ],
+      "exec": [
+        { "id": "unit-status", "label": "systemctl status", "cmd": "systemctl --user status {arg} --no-pager", "arg": "unit" },
+        { "id": "unit-log", "label": "journalctl (unit)", "cmd": "journalctl --user -u {arg} -n 80 --no-pager", "arg": "unit" },
+        { "id": "container-log", "label": "docker logs", "cmd": "docker logs {arg} --tail 80 2>&1", "arg": "container" },
+        { "id": "df", "label": "df -h", "cmd": "df -h", "arg": "none" },
+        { "id": "free", "label": "free -h", "cmd": "free -h", "arg": "none" },
+        { "id": "uptime", "label": "uptime", "cmd": "uptime", "arg": "none" }
+      ]
+    }
+  },
+  "server": {
+    "host": "127.0.0.1",
+    "port": 9090,
+    "cache_ttl_seconds": 15,
+    "collect_timeout_seconds": 40,
+    "control_timeout_seconds": 60,
+    "collect_workers": 3,
+    "metrics_retention_hours": 24,
+    "audit_max_bytes": 1000000,
+    "auth_token": null
+  },
+  "alerts": {
+    "rules": [
+      { "id": "host-down", "type": "host", "state": "unreachable", "severity": "critical" },
+      { "id": "svc-failed", "type": "service", "state": "failed", "severity": "warning" },
+      { "id": "disk-high", "type": "disk", "threshold": 90, "severity": "critical" },
+      { "id": "mem-high", "type": "mem", "threshold": 90, "severity": "warning" },
+      { "id": "load-high", "type": "load", "threshold": null, "severity": "warning" }
+    ],
+    "webhooks": []
+  }
+}
