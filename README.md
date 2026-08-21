@@ -19,7 +19,7 @@ acer (vphomelab)  ────────┘        ├── metrics.py    ─
 ## Quickstart
 
 ```bash
-cd ~/.reasonix/global-workspace/command-center
+cd ~/command-center
 ./run.sh start          # http://127.0.0.1:9090  (logs/server.log)
 ./run.sh open           # open in browser
 ./run.sh stop
