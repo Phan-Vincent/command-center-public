@@ -35,7 +35,8 @@ Per host column (MacBook / hermes / acer):
 
 | Section | Contents |
 |---|---|
-| Fleet strip (top) | health pill (ok/degraded/down/critical), hosts up, failed services, alert count |
+| Fleet strip (top) | health pill, hosts up, failed services, alert count, refresh countdown |
+| Issues | deduplicated alerts + unreachable/stale hosts, collection errors, failed services, unhealthy containers |
 | System | uptime, load, CPU, memory + disk bars, **sparklines** for load/mem/disk history |
 | systemd user units | active/failed chips, sortable, per-unit **log** button |
 | docker containers | healthy states, **live CPU/mem%**, per-container **log** button |
@@ -46,12 +47,15 @@ Per host column (MacBook / hermes / acer):
 | restic backups | latest snapshot per repo (best-effort) |
 | projects | git branch/commit/dirty + deployment notes |
 | links | reachable web UIs (immich, wekan, pihole, ngrok URLs) |
-| control | allowlisted action buttons + **read-only exec console** |
+| control | per-host action drawer with grouped probes, **read-only exec**, service actions, confirmations, and retained results |
 
-Plus: global search filter, collapsible sections, sortable tables, alerts
-banner + drawer, control audit-log drawer, and a live **log-tail drawer**.
+Plus: All/Attention and host filters, global search across every section,
+remembered density/collapse/sort/auto-refresh preferences, sortable tables,
+alerts + audit drawers, and a live **log-tail drawer**. The responsive mobile
+layout shows one selected host at a time while keeping the global issue queue.
 
-Auto-refreshes every 15 s (toggleable). Alerts are evaluated on every
+Auto-refreshes every 15 s (toggleable and paused while the page is hidden);
+manual refresh forces a fresh fleet collection. Alerts are evaluated on every
 collection and dispatched to configured webhooks on first fire.
 
 ## API
@@ -60,7 +64,7 @@ collection and dispatched to configured webhooks on first fire.
 |---|---|
 | `GET /api/status` | full fleet status + summary + alerts (cached, background refresh) |
 | `GET /api/status?force=1` | force a fresh collection |
-| `GET /api/config` | hosts + actions + exec metadata |
+| `GET /api/config` | hosts + actions + exec metadata (auth/webhook secrets omitted) |
 | `GET /api/metrics?host=&metric=&limit=` | time-series (load1/5/15, mem_used_gb, disk_use_pct, …) |
 | `GET /api/alerts` | active alerts |
 | `GET /api/logs?host=&type=unit|container&target=&tail=` | tail journalctl / docker logs (whitelisted) |

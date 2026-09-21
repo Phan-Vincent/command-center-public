@@ -18,6 +18,7 @@ Usage:
 """
 
 import argparse
+import copy
 import json
 import threading
 import time
@@ -37,6 +38,24 @@ WEB_DIR = BASE / "web"
 # Global state ---------------------------------------------------------------
 STATE = {"status": None, "lock": threading.Lock(), "last_full": 0.0,
          "collecting": False, "alerts": []}
+
+
+def public_config(cfg=None):
+    """Return dashboard configuration without authentication secrets.
+
+    ``/api/config`` is intentionally readable before a user has supplied an
+    auth token, so it must never return that token or secret-bearing webhook
+    URLs.  Work on a deep copy so request handling cannot mutate live config.
+    """
+    source = collector.load_config() if cfg is None else cfg
+    public = copy.deepcopy(source)
+    server_cfg = public.get("server")
+    if isinstance(server_cfg, dict):
+        server_cfg["auth_required"] = bool(server_cfg.pop("auth_token", None))
+    alerts_cfg = public.get("alerts")
+    if isinstance(alerts_cfg, dict):
+        alerts_cfg.pop("webhooks", None)
+    return public
 
 
 def _summarize(status, active_alerts):
@@ -183,7 +202,7 @@ class Handler(BaseHTTPRequestHandler):
             force = any(p == "force=1" for p in qs.split("&"))
             return self._send(200, refresh_status(force=force))
         if path == "/api/config":
-            return self._send(200, collector.load_config())
+            return self._send(200, public_config())
         if path == "/api/metrics":
             q = self._qdict(qs)
             try:
