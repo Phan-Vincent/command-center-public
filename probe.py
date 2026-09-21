@@ -13,11 +13,14 @@ listening ports, key agent processes, hermes cron jobs, system crontab,
 git projects, and a few known extra paths per host.
 """
 
+import hashlib
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 
 HOSTNAME = subprocess.run(["hostname", "-s"], capture_output=True, text=True).stdout.strip() or "unknown"
 
@@ -315,6 +318,187 @@ def os_release():
     return None
 
 
+def _read_only_db(path):
+    """Open an existing SQLite database without creating or migrating it."""
+    return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+
+
+def _safe_tree(root):
+    """Hash source/config artifacts while excluding state and credential files."""
+    allowed = {".py", ".md", ".service", ".timer", ".json"}
+    blocked = (".env", "auth", "token", "secret", ".db", "cache")
+    result = {}
+    if not os.path.isdir(root):
+        return result
+    for base, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if d not in {".git", "__pycache__", "venv"}]
+        for name in files:
+            lower = name.lower()
+            if any(part in lower for part in blocked):
+                continue
+            if os.path.splitext(name)[1].lower() not in allowed:
+                continue
+            path = os.path.join(base, name)
+            rel = os.path.relpath(path, root)
+            try:
+                with open(path, "rb") as handle:
+                    result[rel] = hashlib.sha256(handle.read()).hexdigest()
+            except OSError:
+                continue
+    return result
+
+
+def _drift_counts(left, right):
+    left_keys, right_keys = set(left), set(right)
+    shared = left_keys & right_keys
+    return {
+        "identical": sum(left[key] == right[key] for key in shared),
+        "divergent": sum(left[key] != right[key] for key in shared),
+        "repository_only": len(left_keys - right_keys),
+        "runtime_only": len(right_keys - left_keys),
+    }
+
+
+def _gate_funnel(rows):
+    """Split gate-audit categories into actionable candidates and abstentions."""
+    categories = {str(row[0] or "none"): int(row[1]) for row in rows}
+    actionable = {"BUY", "REVIEW", "MAYBE", "WATCH"}
+    candidates = sum(
+        count for category, count in categories.items()
+        if category.upper() in actionable
+    )
+    return candidates, sum(categories.values()) - candidates, categories
+
+
+def pokemon_scanner_health():
+    """Best-effort, read-only scanner health for the hermes dashboard."""
+    if HOSTNAME != "peeruser-Dell":
+        return None
+    home = os.path.expanduser("~")
+    runtime = os.path.join(home, ".hermes", "scripts")
+    repo = os.path.join(home, "projects", "pokemon-scanner")
+    status_script = os.path.join(runtime, "scanner_status.py")
+    python = os.path.join(home, ".hermes", "hermes-agent", "venv", "bin", "python3")
+    result = {"available": False, "errors": []}
+    try:
+        proc = subprocess.run(
+            [python, status_script, "--json"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError((proc.stderr or proc.stdout).strip()[:200])
+        raw = json.loads(proc.stdout)
+        source = raw.get("source_health") or {}
+        result.update({
+            "available": True,
+            "generated_at": raw.get("generated_at"),
+            "last_run": raw.get("last_run"),
+            "last_success_at": raw.get("last_success_at"),
+            "next_scheduled_run": sh(
+                "systemctl --user show pokemon-scanner.timer "
+                "-p NextElapseUSecRealtime --value 2>/dev/null"
+            ) or raw.get("next_scheduled_run"),
+            "browser": raw.get("browser"),
+            "ebay_auth": raw.get("ebay_auth"),
+            "pending_outbox": raw.get("pending_outbox"),
+            "source_health": {
+                "ok": source.get("ok"),
+                "detail": source.get("detail"),
+                "window_hours": source.get("window_hours"),
+                "sources": source.get("sources") or {},
+                "latest": {
+                    key: {
+                        "status": value.get("status"),
+                        "attempted_at": value.get("attempted_at"),
+                    }
+                    for key, value in (source.get("latest") or {}).items()
+                },
+            },
+        })
+    except Exception as exc:  # noqa: BLE001
+        result["errors"].append(f"status: {exc}")
+
+    ops_path = os.path.join(runtime, "scanner_ops.db")
+    try:
+        conn = _read_only_db(ops_path)
+        conn.row_factory = sqlite3.Row
+        last_run = result.get("last_run") or {}
+        since = last_run.get("started_at") or (
+            datetime.now(timezone.utc) - timedelta(hours=24)
+        ).isoformat()
+        failures = conn.execute(
+            """
+            SELECT source, status, COUNT(*) AS count
+            FROM source_attempts
+            WHERE attempted_at >= ?
+              AND status NOT IN ('success','cache_hit','cache','disabled','skipped','not_needed')
+            GROUP BY source, status ORDER BY source, status
+            """,
+            (since,),
+        ).fetchall()
+        result["source_failures"] = [dict(row) for row in failures]
+        conn.close()
+    except Exception as exc:  # noqa: BLE001
+        result["errors"].append(f"ops: {exc}")
+
+    gate_path = os.path.join(runtime, "gate_audit.db")
+    try:
+        conn = _read_only_db(gate_path)
+        since = ((result.get("last_run") or {}).get("started_at") or "")
+        rows = conn.execute(
+            "SELECT category, COUNT(*) FROM gate_audit WHERE scanned_at >= ? GROUP BY category",
+            (since,),
+        ).fetchall()
+        candidates, abstentions, categories = _gate_funnel(rows)
+        result["candidate_count"] = candidates
+        result["abstention_count"] = abstentions
+        result["candidate_categories"] = categories
+        conn.close()
+    except Exception as exc:  # noqa: BLE001
+        result["errors"].append(f"gate audit: {exc}")
+
+    paper_path = os.path.join(
+        home, ".hermes", "data", "pokemon-scanner", "paper-backtest", "paper_trades.db"
+    )
+    try:
+        conn = _read_only_db(paper_path)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT experiment_id, started_at, discovery_ends_at, finalizes_at,
+                   status, completed_at
+            FROM experiments ORDER BY started_at DESC LIMIT 1
+            """
+        ).fetchone()
+        result["paper_experiment"] = dict(row) if row else None
+        conn.close()
+    except Exception as exc:  # noqa: BLE001
+        result["errors"].append(f"paper: {exc}")
+
+    result["services"] = {
+        "discord_handler": sh("systemctl --user is-active discord-interaction-handler.service 2>/dev/null"),
+        "tunnel": sh("systemctl --user is-active pokemon-ngrok.service 2>/dev/null"),
+    }
+    try:
+        result["drift"] = {
+            "repository_runtime": _drift_counts(
+                _safe_tree(os.path.join(repo, "scripts")), _safe_tree(runtime)
+            ),
+            "repository_skill": _drift_counts(
+                _safe_tree(os.path.join(repo, "skill")),
+                _safe_tree(os.path.join(
+                    home, ".hermes", "skills", "software-development",
+                    "pokemon-card-scanner",
+                )),
+            ),
+        }
+    except Exception as exc:  # noqa: BLE001
+        result["errors"].append(f"drift: {exc}")
+    return result
+
+
 def main():
     payload = {
         "host": HOSTNAME,
@@ -341,6 +525,7 @@ def main():
         "projects": projects(),
         "extras": host_extras(),
         "restic_ages": restic_ages(),
+        "pokemon_scanner": pokemon_scanner_health(),
     }
     json.dump(payload, sys.stdout, indent=1)
     sys.stdout.write("\n")

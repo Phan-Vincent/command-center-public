@@ -5,6 +5,7 @@ import json
 import threading
 import time
 import urllib.request
+from datetime import datetime, timezone
 
 # alert key -> first-seen epoch (in-memory; resets on restart)
 _STATE = {}
@@ -21,6 +22,16 @@ def _num(x):
 
 def _now_iso():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _age_seconds(value):
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - parsed).total_seconds()
+    except (TypeError, ValueError):
+        return None
 
 
 def _evaluate_host(host, h, rules):
@@ -64,6 +75,36 @@ def _evaluate_host(host, h, rules):
             if load and thr is not None and _num(load[0]) is not None and load[0] >= thr:
                 alerts.append({"host": host, "rule": rule.get("id", "load-high"),
                                "severity": sev, "message": f"{host}: load {load[0]:.1f} (≥ {thr:.1f})"})
+        elif t == "pokemon_stale":
+            scanner = h.get("pokemon_scanner") or {}
+            age = _age_seconds(scanner.get("last_success_at"))
+            threshold = _num(rule.get("threshold_hours", 7))
+            stale = age is None or (threshold is not None and age >= threshold * 3600)
+            if scanner.get("available") and threshold is not None and stale:
+                detail = "has no recorded successful run" if age is None else f"stale for {age / 3600:.1f}h"
+                alerts.append({"host": host, "rule": rule.get("id", "pokemon-stale"),
+                               "severity": sev,
+                               "message": f"{host}: Pokémon scan {detail}"})
+        elif t == "pokemon_source":
+            scanner = h.get("pokemon_scanner") or {}
+            sources = ((scanner.get("source_health") or {}).get("sources") or {})
+            min_attempts = int(_num(rule.get("min_attempts", 10)) or 10)
+            min_rate = _num(rule.get("min_rate", 0.10))
+            for source, sample in sources.items():
+                active = max(0, int(_num(sample.get("attempted")) or 0) - int(_num(sample.get("ignored")) or 0))
+                usable = int(_num(sample.get("usable")) or 0)
+                rate = usable / active if active else None
+                if active >= min_attempts and rate is not None and min_rate is not None and rate < min_rate:
+                    alerts.append({"host": host, "rule": rule.get("id", "pokemon-source"),
+                                   "severity": sev,
+                                   "message": f"{host}: Pokémon {source} yield {usable}/{active} ({rate:.1%})"})
+        elif t == "pokemon_service":
+            scanner = h.get("pokemon_scanner") or {}
+            for component, state in (scanner.get("services") or {}).items():
+                if state != "active":
+                    alerts.append({"host": host, "rule": rule.get("id", "pokemon-service"),
+                                   "severity": sev,
+                                   "message": f"{host}: Pokémon {component} is {state or 'unknown'}"})
     return alerts
 
 

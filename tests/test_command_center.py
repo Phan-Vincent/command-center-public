@@ -15,6 +15,8 @@ sys.path.insert(0, str(BASE))
 import collector  # noqa: E402
 import control  # noqa: E402
 import server  # noqa: E402
+import alerts  # noqa: E402
+import probe  # noqa: E402
 
 
 class ConfigTests(unittest.TestCase):
@@ -147,6 +149,138 @@ class CollectorTests(unittest.TestCase):
         facts = collector.collect_local(cfg_host)
         for field in ("hostname", "cpu", "mem", "disk", "loadavg", "ports"):
             self.assertIn(field, facts)
+
+
+class PokemonHealthTests(unittest.TestCase):
+    def tearDown(self):
+        alerts._STATE.clear()
+        alerts._NOTIFIED.clear()
+
+    def test_source_alert_is_per_provider_not_aggregate(self):
+        status = {"hosts": {"hermes": {
+            "reachable": True,
+            "pokemon_scanner": {
+                "available": True,
+                "last_success_at": datetime_now_iso(),
+                "services": {"discord_handler": "active", "tunnel": "active"},
+                "source_health": {"sources": {
+                    "ebay_sold": {"attempted": 32, "ignored": 0, "usable": 2},
+                    "pokemontcg": {"attempted": 35, "ignored": 0, "usable": 35},
+                    "pricecharting": {"attempted": 30, "ignored": 0, "usable": 1},
+                }},
+            },
+        }}}
+        cfg = {"alerts": {"rules": [{
+            "id": "pokemon-source", "type": "pokemon_source",
+            "min_attempts": 10, "min_rate": 0.10, "severity": "critical",
+        }], "webhooks": []}}
+        found = alerts.evaluate(status, cfg)
+        self.assertEqual(len(found), 2)
+        self.assertTrue(any("ebay_sold" in item["message"] for item in found))
+        self.assertTrue(any("pricecharting" in item["message"] for item in found))
+
+    def test_scanner_stale_and_service_alerts(self):
+        status = {"hosts": {"hermes": {
+            "reachable": True,
+            "pokemon_scanner": {
+                "available": True,
+                "last_success_at": "2000-01-01T00:00:00+00:00",
+                "services": {"discord_handler": "inactive", "tunnel": "active"},
+            },
+        }}}
+        cfg = {"alerts": {"rules": [
+            {"id": "pokemon-stale", "type": "pokemon_stale", "threshold_hours": 7},
+            {"id": "pokemon-service", "type": "pokemon_service"},
+        ], "webhooks": []}}
+        found = alerts.evaluate(status, cfg)
+        self.assertEqual({item["rule"] for item in found}, {"pokemon-stale", "pokemon-service"})
+
+    def test_scanner_without_success_timestamp_is_stale(self):
+        status = {"hosts": {"hermes": {
+            "reachable": True,
+            "pokemon_scanner": {"available": True, "last_success_at": None},
+        }}}
+        cfg = {"alerts": {"rules": [
+            {"id": "pokemon-stale", "type": "pokemon_stale", "threshold_hours": 7},
+        ], "webhooks": []}}
+        found = alerts.evaluate(status, cfg)
+        self.assertEqual(len(found), 1)
+        self.assertIn("no recorded successful run", found[0]["message"])
+
+    def test_gate_funnel_separates_candidates_from_abstentions(self):
+        candidates, abstentions, categories = probe._gate_funnel([
+            ("WATCH", 3), ("BUY", 1), ("none", 11), ("suppressed", 2),
+        ])
+        self.assertEqual(candidates, 4)
+        self.assertEqual(abstentions, 13)
+        self.assertEqual(categories["WATCH"], 3)
+
+    def test_drift_inventory_excludes_state_and_credentials(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "scanner.py").write_text("safe", encoding="utf-8")
+            (root / "scanner_ops.db").write_text("state", encoding="utf-8")
+            (root / "auth.json").write_text("secret", encoding="utf-8")
+            (root / ".env").write_text("secret", encoding="utf-8")
+            inventory = probe._safe_tree(str(root))
+        self.assertEqual(set(inventory), {"scanner.py"})
+
+
+def datetime_now_iso():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+class PublicConfigTests(unittest.TestCase):
+    def test_public_config_omits_auth_and_webhook_secrets(self):
+        cfg = {
+            "hosts": {"macbook": {"label": "MacBook"}},
+            "server": {"port": 9090, "auth_token": "top-secret-token"},
+            "alerts": {
+                "rules": [{"id": "host-down", "type": "host"}],
+                "webhooks": [{"url": "https://hooks.example/secret"}],
+            },
+        }
+
+        public = server.public_config(cfg)
+
+        self.assertNotIn("auth_token", public["server"])
+        self.assertTrue(public["server"]["auth_required"])
+        self.assertNotIn("webhooks", public["alerts"])
+        self.assertEqual(public["server"]["port"], 9090)
+        self.assertIn("hosts", public)
+        # Sanitizing a response must not mutate the server's live config.
+        self.assertEqual(cfg["server"]["auth_token"], "top-secret-token")
+        self.assertIn("webhooks", cfg["alerts"])
+
+    def test_public_config_reports_auth_disabled_without_token(self):
+        public = server.public_config({"hosts": {}, "server": {"auth_token": None}})
+        self.assertFalse(public["server"]["auth_required"])
+        self.assertNotIn("auth_token", public["server"])
+
+    def test_config_endpoint_returns_only_sanitized_config(self):
+        cfg = {
+            "hosts": {"macbook": {"label": "MacBook"}},
+            "server": {"auth_token": "top-secret-token"},
+            "alerts": {"webhooks": [{"url": "https://hooks.example/secret"}]},
+        }
+        original_load_config = collector.load_config
+        collector.load_config = lambda: cfg
+        handler = object.__new__(server.Handler)
+        handler.path = "/api/config"
+        sent = {}
+        handler._send = lambda code, body, ctype="application/json; charset=utf-8": sent.update(
+            {"code": code, "body": body, "ctype": ctype})
+        try:
+            handler.do_GET()
+        finally:
+            collector.load_config = original_load_config
+
+        self.assertEqual(sent["code"], 200)
+        payload = sent["body"]
+        body = json.dumps(payload)
+        self.assertTrue(payload["server"]["auth_required"])
+        self.assertNotIn("top-secret-token", body)
+        self.assertNotIn("hooks.example", body)
 
 
 class RefreshStatusTests(unittest.TestCase):

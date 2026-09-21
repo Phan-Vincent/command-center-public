@@ -150,7 +150,10 @@
       { "id": "svc-failed", "type": "service", "state": "failed", "severity": "warning" },
       { "id": "disk-high", "type": "disk", "threshold": 90, "severity": "critical" },
       { "id": "mem-high", "type": "mem", "threshold": 90, "severity": "warning" },
-      { "id": "load-high", "type": "load", "threshold": null, "severity": "warning" }
+      { "id": "load-high", "type": "load", "threshold": null, "severity": "warning" },
+      { "id": "pokemon-stale", "type": "pokemon_stale", "threshold_hours": 7, "severity": "critical" },
+      { "id": "pokemon-source", "type": "pokemon_source", "min_attempts": 10, "min_rate": 0.10, "severity": "critical" },
+      { "id": "pokemon-service", "type": "pokemon_service", "severity": "critical" }
     ],
     "webhooks": []
   }

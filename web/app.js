@@ -85,6 +85,8 @@ const ICONS = {
   control: '<path d="M4 17l6-5-6-5M12 19h8"/>',
   backup: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/>',
   procs: '<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
+  pokemon: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="12" cy="12" r="3"/><path d="M3 10h6M15 10h6"/>',
+  error: '<circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5v.5"/>',
 };
 function icon(name, size = 14) {
   const inner = ICONS[name] || "";
@@ -344,7 +346,12 @@ function secId(hostId, key) { return `sec-${hostId}-${key}`; }
 function hostStatus(h) {
   if (!h.reachable) return "bad";
   const failed = (h.services || []).filter((u) => u.state === "failed").length;
-  if (failed || h.stale || h.errors?.length) return "degraded";
+  const pokemon = h.pokemon_scanner || {};
+  const pokemonFailed = pokemon.available && (
+    pokemon.source_health?.ok === false ||
+    Object.values(pokemon.services || {}).some((value) => value !== "active")
+  );
+  if (failed || pokemonFailed || h.stale || h.errors?.length) return "degraded";
   return "ok";
 }
 
