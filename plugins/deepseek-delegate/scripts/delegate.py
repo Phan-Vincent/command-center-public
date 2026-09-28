@@ -45,7 +45,7 @@ DEFAULTS = {
     "branch_prefix": "delegate/",
     "default_verify": [],            # used when a run passes no --verify
     "summary_max_lines": 5,
-    "max_prompt_bytes": 100_000,
+    "max_prompt_bytes": 512 * 1024,
     # Changed paths matching any of these => security_sensitive (Claude reads the diff).
     "security_path_patterns": [
         r"auth", r"login", r"passw", r"secret", r"token", r"crypt", r"cipher",
@@ -125,16 +125,17 @@ class DelegateError(Exception):
         self.status = status
 
 
-def run_proc(cmd, cwd, timeout, shell=False, env=None):
+def run_proc(cmd, cwd, timeout, shell=False, env=None, stdin_text=None):
     """Run a command in its own process group; kill the whole group on timeout.
 
     Returns (returncode, stdout, stderr, timed_out)."""
     proc = subprocess.Popen(
         cmd, cwd=cwd, shell=shell, env=env, text=True,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        stdin=subprocess.DEVNULL, start_new_session=True)
+        stdin=subprocess.DEVNULL if stdin_text is None else subprocess.PIPE,
+        start_new_session=True)
     try:
-        out, err = proc.communicate(timeout=timeout)
+        out, err = proc.communicate(input=stdin_text, timeout=timeout)
         return proc.returncode, out, err, False
     except subprocess.TimeoutExpired:
         try:
@@ -309,7 +310,6 @@ def build_prompt(task, title, files, verify, read_only, feedback, cfg):
         parts.append(feedback)
     parts.append(FINAL_MESSAGE_CONTRACT.format(n=cfg["summary_max_lines"]))
     prompt = "\n\n".join(parts)
-    # The prompt travels as one argv entry; Linux caps a single arg at 128 KiB.
     size, cap = len(prompt.encode()), int(cfg["max_prompt_bytes"])
     if size > cap:
         raise DelegateError("blocked", f"prompt is {size} bytes (> {cap}); split the task")
@@ -317,20 +317,20 @@ def build_prompt(task, title, files, verify, read_only, feedback, cfg):
 
 
 def call_reasonix(cfg, root, alias, prompt, read_only):
-    cmd = [cfg["reasonix_bin"], "-p", "--model", cfg["models"][alias],
+    # `reasonix run` reads the task from stdin, so task text never touches argv or a shell.
+    cmd = [cfg["reasonix_bin"], "run", "--model", cfg["models"][alias],
            "--permission-mode", "read-only" if read_only else cfg["permission_mode"],
            "--output-format", "json", "--dir", str(root)]
     if int(cfg.get("max_steps") or 0) > 0:
         cmd += ["--max-steps", str(cfg["max_steps"])]
-    cmd.append(prompt)
     t0 = time.monotonic()
     try:
-        rc, out, err, timed_out = run_proc(cmd, root, cfg["timeout_seconds"])
+        rc, out, err, timed_out = run_proc(cmd, root, cfg["timeout_seconds"], stdin_text=prompt)
     except OSError as e:
         raise DelegateError(
             "error", f"cannot run reasonix ({cfg['reasonix_bin']}): {e}; npm i -g reasonix")
     return {"rc": rc, "stdout": out, "stderr": err, "timed_out": timed_out,
-            "duration_ms": int((time.monotonic() - t0) * 1000), "cmd": cmd[:-1] + ["<prompt>"]}
+            "duration_ms": int((time.monotonic() - t0) * 1000), "cmd": cmd}
 
 
 def run_verify(commands, root, timeout):

@@ -29,7 +29,7 @@ def main():
     opts, prompt, i = {}, None, 0
     while i < len(args):
         a = args[i]
-        if a == "-p":
+        if a in ("-p", "run"):
             i += 1
         elif a.startswith("--"):
             opts[a[2:]] = args[i + 1]
@@ -37,6 +37,8 @@ def main():
         else:
             prompt = a
             i += 1
+    if prompt is None:
+        prompt = sys.stdin.read()
 
     plan_path = Path(os.environ["FAKE_REASONIX_PLAN"])
     counter = plan_path.with_suffix(".count")

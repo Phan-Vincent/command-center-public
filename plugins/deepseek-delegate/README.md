@@ -13,7 +13,7 @@ change with your tests, commits it, logs tokens and cost, and returns
    ▼
 scripts/delegate.py run   (one Bash call per sub-task)
    1. guardrails: clean tree; auto-branch off main/master → delegate/<slug>-xxxx
-   2. reasonix -p --model deepseek-flash --permission-mode workspace-write --output-format json
+   2. reasonix run --model deepseek-flash --permission-mode workspace-write --output-format json  (spec on stdin)
    3. run YOUR --verify commands (the model's own "tests pass" is not trusted)
    4. pass → git commit "delegate(flash): <title>"         fail → retry with test output
    5. ladder: flash, flash, pro, pro → then stash + "needs_human"
@@ -225,15 +225,20 @@ tells you whether a name resolves.
 
 ## How it relates to Reasonix
 
-- **Headless:** `reasonix -p … --output-format json` runs one task and exits
-  with a `{"type":"result", usage, total_cost, …}` object. That's the only
-  integration this plugin uses.
+- **Headless:** `reasonix run … --output-format json` reads the task from stdin,
+  runs it and exits with a `{"type":"result", usage, total_cost, …}` object.
+  That's the only integration this plugin uses. Specs can be up to 512 KiB, and
+  the task text never touches argv or a shell.
 - **Sandbox:** `workspace-write` (Reasonix's default) lets DeepSeek write inside
   the repo and run builds and tests in its OS sandbox without approval prompts.
   `read-only` fails closed on any write.
-- **Not an MCP server:** Reasonix is an MCP *client*. Its `reasonix acp` stdio
-  server speaks the Agent Client Protocol, which Claude Code doesn't consume.
-  So the CLI is the integration point.
+- **MCP:** Reasonix itself is only an MCP *client* (`reasonix acp` speaks ACP,
+  not MCP). The sibling plugin [`reasonix-orchestrator`](../reasonix-orchestrator/)
+  adds a small stdio MCP server (`probe`, `delegate_read`, `delegate_write`,
+  with optional SSH hosts). The skill uses those tools only for read-only work
+  on remote hosts. Code changes always go through `delegate.py`, because it adds
+  verification, per-task commits, cost logging and escalation, which the MCP
+  tools don't.
 
 ## Troubleshooting
 

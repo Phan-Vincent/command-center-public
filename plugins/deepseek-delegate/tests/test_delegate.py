@@ -90,6 +90,7 @@ class DelegateTest(unittest.TestCase):
         self.assertEqual((call["model"], call["input_tokens"], call["pass"]), ("flash", 1000, True))
         # Reasonix got the contract and the right flags
         c = self.recorded_calls()[0]
+        self.assertNotIn("implement add()", " ".join(c["opts"].values()))  # prompt via stdin
         self.assertEqual(c["opts"]["model"], "deepseek-flash")
         self.assertEqual(c["opts"]["permission-mode"], "workspace-write")
         self.assertEqual(c["opts"]["output-format"], "json")
@@ -146,7 +147,7 @@ class DelegateTest(unittest.TestCase):
     def test_empty_and_oversized_tasks_are_blocked(self):
         code, out = self.delegate("run", "--task", "   ", plan=[{}])
         self.assertEqual((code, json.loads(out)["status"]), (2, "blocked"))
-        code, out = self.delegate("run", "--task", "é" * 60_000, plan=[{}])
+        code, out = self.delegate("run", "--task-file", "-", plan=[{}], stdin="é" * 300_000)
         self.assertIn("bytes", json.loads(out)["error"])
         self.assertEqual(self.recorded_calls(), [])
 

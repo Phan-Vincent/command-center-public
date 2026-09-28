@@ -103,6 +103,19 @@ in the spec. Otherwise pass them to the user.
    `git revert <sha>`), anything escalated or stashed, and the cost from
    `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/delegate.py" stats --since 24h`.
 
+## Reasonix MCP tools (optional)
+
+If the `reasonix-orchestrator` plugin is installed, its `reasonix` MCP server
+offers `probe`, `delegate_read` and `delegate_write`. Use them like this:
+
+- Use `probe` / `delegate_read` for read-only work **on an SSH host the user
+  named**. Its reply contains Reasonix's full answer, so keep the contract
+  tightly scoped.
+- For local read-only work, prefer `delegate.py run --read-only`. It returns a
+  capped summary and logs cost.
+- Don't use `delegate_write` for code changes. It skips verification, commits,
+  cost logging and the Flash→Pro ladder. Use `delegate.py run` instead.
+
 ## Rules
 
 - Never write implementation code yourself unless DeepSeek failed the full ladder
