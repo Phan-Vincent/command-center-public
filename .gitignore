@@ -8,3 +8,4 @@ audit.jsonl.1
 
 # macOS
 .DS_Store
+.Rhistory
