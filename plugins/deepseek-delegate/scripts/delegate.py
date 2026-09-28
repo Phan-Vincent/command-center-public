@@ -440,6 +440,9 @@ def save_attempt(state_dir, task_id, n, payload):
 # ---------------------------------------------------------------- run
 
 def ladder(start, attempts_per_model, escalate):
+    """Ordered list of models to try, each repeated attempts_per_model times.
+    Starting at "flash" escalates to "pro" unless escalate is False, in which
+    case only the start model is used."""
     order = ["flash", "pro"] if start == "flash" else ["pro"]
     if not escalate:
         order = [start]
