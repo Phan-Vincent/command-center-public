@@ -1,0 +1,11 @@
+{
+  "name": "deepseek-delegate",
+  "version": "0.1.0",
+  "description": "Claude plans and reviews; DeepSeek (Flash/Pro via the Reasonix CLI) writes the code. Verified, committed per task, cost-logged.",
+  "author": {
+    "name": "phan-vincent"
+  },
+  "repository": "https://github.com/phan-vincent/command-center-public",
+  "license": "MIT",
+  "keywords": ["deepseek", "reasonix", "delegation", "cost", "subagent"]
+}

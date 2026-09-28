@@ -1,0 +1,19 @@
+{
+  "name": "command-center",
+  "owner": {
+    "name": "phan-vincent"
+  },
+  "description": "Personal Claude Code plugins from the command-center repo.",
+  "plugins": [
+    {
+      "name": "deepseek-delegate",
+      "source": "./plugins/deepseek-delegate",
+      "description": "Delegate coding work to DeepSeek via Reasonix; Claude only plans and reviews."
+    },
+    {
+      "name": "reasonix-orchestrator",
+      "source": "./plugins/reasonix-orchestrator",
+      "description": "Mac-local stdio MCP server: probe / delegate_read / delegate_write to Reasonix workers, locally or over SSH."
+    }
+  ]
+}

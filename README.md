@@ -160,6 +160,9 @@ web/             dashboard UI (index.html, app.js, style.css)
 tests/           unittest suite + live smoke test
 run.sh           start/stop/status/open/test/health helper
 setup/           one-time host setup (polkit reboot rule, no sudo)
+plugins/         Claude Code plugins: deepseek-delegate (/delegate → DeepSeek via Reasonix),
+                 reasonix-orchestrator (Mac stdio MCP server; also a Codex plugin)
+.claude-plugin/  marketplace manifest for the plugins above
 audit.jsonl      control audit trail (created at runtime)
 data/            metrics.db (created at runtime)
 logs/            server log + pidfile (created at runtime)
@@ -167,3 +170,13 @@ logs/            server log + pidfile (created at runtime)
 
 See `INVENTORY.md` for the full three-system inventory this dashboard was
 scaffolded from.
+
+## Claude Code plugin: deepseek-delegate
+
+`plugins/deepseek-delegate/` makes Claude plan and review while DeepSeek
+(via the Reasonix CLI) writes the code. Each task is verified, committed on its
+own and cost-logged. See [its README](plugins/deepseek-delegate/README.md) for
+setup (`/plugin marketplace add phan-vincent/command-center-public`) and a cost-check
+example. `plugins/reasonix-orchestrator/` is the Mac-local Reasonix MCP server.
+It installs from the same marketplace for Claude Code, and it's also the Codex
+plugin that `./orchestrator` uses.
