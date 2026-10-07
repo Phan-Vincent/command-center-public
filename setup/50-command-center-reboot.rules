@@ -5,7 +5,7 @@
 // `systemctl reboot` actions in config.json work from the dashboard without an
 // interactive password prompt.
 //
-// Install on hermes (user peeruser) and acer (user phanvincent2):
+// Install on hermes (user peeruser) and acer (user phanvincent):
 //
 //   sudo install -m 0644 50-command-center-reboot.rules /etc/polkit-1/rules.d/
 //
@@ -15,7 +15,7 @@
 polkit.addRule(function (action, subject) {
     if ((action.id === "org.freedesktop.login1.reboot" ||
          action.id === "org.freedesktop.login1.reboot-multiple-sessions") &&
-        (subject.user === "peeruser" || subject.user === "phanvincent2")) {
+        (subject.user === "peeruser" || subject.user === "phanvincent")) {
         return polkit.Result.YES;
     }
 });

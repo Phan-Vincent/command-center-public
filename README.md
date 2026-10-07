@@ -103,7 +103,7 @@ sudo install -m 0644 setup/50-command-center-reboot.rules /etc/polkit-1/rules.d/
 
 polkitd reloads `rules.d` automatically. The rule grants *only* reboot
 (`org.freedesktop.login1.reboot[-multiple-sessions]`) to `peeruser` and
-`phanvincent2` — no other privilege escalation.
+`phanvincent` — no other privilege escalation.
 
 A reboot kills ssh before the command can return, so these actions carry
 `"disconnect_ok": true`: `control.py` treats ssh's "connection dropped" exit
