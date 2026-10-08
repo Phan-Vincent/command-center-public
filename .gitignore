@@ -1,0 +1,10 @@
+# Runtime artifacts — never commit
+__pycache__/
+*.pyc
+logs/
+data/
+audit.jsonl
+audit.jsonl.1
+
+# macOS
+.DS_Store

@@ -1,0 +1,21 @@
+// Command Center — passwordless reboot over SSH for the fleet's SSH users.
+//
+// This grants ONLY the ability to reboot (org.freedesktop.login1.reboot), with
+// no sudo and no other privilege escalation. It lets the allowlisted
+// `systemctl reboot` actions in config.json work from the dashboard without an
+// interactive password prompt.
+//
+// Install on hermes (user workstation-user) and acer (user homelab-user):
+//
+//   sudo install -m 0644 50-command-center-reboot.rules /etc/polkit-1/rules.d/
+//
+// polkitd reloads rules.d automatically (no service restart needed on Ubuntu).
+// To also allow shutdown/power-off, add "org.freedesktop.login1.power-off" and
+// "org.freedesktop.login1.power-off-multiple-sessions" to the condition below.
+polkit.addRule(function (action, subject) {
+    if ((action.id === "org.freedesktop.login1.reboot" ||
+         action.id === "org.freedesktop.login1.reboot-multiple-sessions") &&
+        (subject.user === "workstation-user" || subject.user === "homelab-user")) {
+        return polkit.Result.YES;
+    }
+});

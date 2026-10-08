@@ -1,0 +1,6 @@
+interface:
+  display_name: "Reasonix Orchestrator"
+  short_description: "Delegate bounded coding work to Reasonix"
+  default_prompt: "Use $reasonix-orchestrator to delegate this coding task to Reasonix and verify the result."
+policy:
+  allow_implicit_invocation: true

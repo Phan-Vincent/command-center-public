@@ -1,0 +1,32 @@
+{
+  "name": "reasonix-orchestrator",
+  "version": "0.1.1+codex.20260925015204",
+  "description": "Let Codex supervise safe, bounded Reasonix coding workers locally or over SSH.",
+  "author": {
+    "name": "Vincent"
+  },
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "keywords": [
+    "reasonix",
+    "deepseek",
+    "orchestration",
+    "coding-agent"
+  ],
+  "interface": {
+    "displayName": "Reasonix Orchestrator",
+    "shortDescription": "Delegate bounded work through a local Reasonix MCP.",
+    "longDescription": "Codex supervises a Mac-local stdio MCP server that delegates bounded research, review, implementation, or verification tasks to Reasonix on this Mac or an explicitly named SSH host. Includes separate probe, read-only, and explicitly authorized write tools plus structured results and independent verification guidance.",
+    "developerName": "Vincent",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Use Reasonix to inspect this bug, then verify its findings.",
+      "Delegate independent repository research to Reasonix.",
+      "Have Reasonix implement this bounded change and verify it."
+    ]
+  }
+}

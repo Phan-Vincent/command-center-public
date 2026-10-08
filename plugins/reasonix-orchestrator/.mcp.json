@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "reasonix": {
+      "title": "Reasonix Orchestrator",
+      "description": "Delegate bounded coding work from this Mac to local or explicitly named SSH Reasonix workers.",
+      "cwd": ".",
+      "command": "python3",
+      "args": [
+        "./mcp/reasonix_mcp.py"
+      ],
+      "startup_timeout_sec": 30
+    }
+  }
+}

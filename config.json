@@ -1,0 +1,288 @@
+{
+  "_comment": "Synthetic demo inventory. Replace example hosts, endpoints, projects and services for your deployment.",
+  "hosts": {
+    "macbook": {
+      "name": "macbook",
+      "label": "macbook (demo host)",
+      "role": "primary",
+      "connect": "local",
+      "os_hint": "macOS",
+      "tailscale_ip": "100.64.0.1",
+      "projects": [
+        {
+          "name": "Demo app",
+          "path": "~/projects/demo-app",
+          "note": "Synthetic example project"
+        }
+      ],
+      "agents": [
+        {
+          "name": "Demo service",
+          "match": "demo-service",
+          "port": 8080,
+          "note": "Synthetic example process"
+        }
+      ],
+      "links": [
+        {
+          "label": "Demo dashboard",
+          "url": "http://127.0.0.1:8080",
+          "reach": "local"
+        }
+      ],
+      "actions": [
+        {
+          "id": "macbook-demo-status",
+          "label": "Demo service status",
+          "cmd": "pgrep -fl demo-service | head -5"
+        }
+      ],
+      "exec": [
+        {
+          "id": "mac-df",
+          "label": "df -h",
+          "cmd": "df -h",
+          "arg": "none"
+        },
+        {
+          "id": "mac-mem",
+          "label": "vm_stat",
+          "cmd": "vm_stat | head -12",
+          "arg": "none"
+        },
+        {
+          "id": "mac-top",
+          "label": "top CPU",
+          "cmd": "ps -Ao pid,pcpu,pmem,comm -r | head -10",
+          "arg": "none"
+        }
+      ]
+    },
+    "hermes": {
+      "name": "hermes",
+      "label": "hermes (demo host)",
+      "role": "workstation",
+      "connect": "ssh",
+      "os_hint": "Ubuntu 24.04",
+      "tailscale_ip": "100.64.0.2",
+      "projects": [
+        {
+          "name": "Demo app",
+          "path": "~/projects/demo-app",
+          "note": "Synthetic example project"
+        }
+      ],
+      "agents": [
+        {
+          "name": "Demo service",
+          "match": "demo-service",
+          "port": 8080,
+          "note": "Synthetic example process"
+        }
+      ],
+      "links": [
+        {
+          "label": "Demo dashboard",
+          "url": "http://127.0.0.1:8080",
+          "reach": "local"
+        }
+      ],
+      "actions": [
+        {
+          "id": "hermes-demo-status",
+          "label": "Demo service status",
+          "cmd": "systemctl --user is-active demo-service"
+        },
+        {
+          "id": "hermes-reboot",
+          "label": "Reboot demo host",
+          "cmd": "systemctl reboot",
+          "disconnect_ok": true
+        }
+      ],
+      "exec": [
+        {
+          "id": "unit-status",
+          "label": "systemctl status",
+          "cmd": "systemctl --user status {arg} --no-pager",
+          "arg": "unit"
+        },
+        {
+          "id": "unit-log",
+          "label": "journalctl (unit)",
+          "cmd": "journalctl --user -u {arg} -n 80 --no-pager",
+          "arg": "unit"
+        },
+        {
+          "id": "container-log",
+          "label": "docker logs",
+          "cmd": "docker logs {arg} --tail 80 2>&1",
+          "arg": "container"
+        },
+        {
+          "id": "df",
+          "label": "df -h",
+          "cmd": "df -h",
+          "arg": "none"
+        },
+        {
+          "id": "free",
+          "label": "free -h",
+          "cmd": "free -h",
+          "arg": "none"
+        },
+        {
+          "id": "uptime",
+          "label": "uptime",
+          "cmd": "uptime",
+          "arg": "none"
+        }
+      ]
+    },
+    "acer": {
+      "name": "acer",
+      "label": "acer (demo host)",
+      "role": "homelab",
+      "connect": "ssh",
+      "os_hint": "Ubuntu",
+      "tailscale_ip": "100.64.0.3",
+      "projects": [
+        {
+          "name": "Demo app",
+          "path": "~/projects/demo-app",
+          "note": "Synthetic example project"
+        }
+      ],
+      "agents": [
+        {
+          "name": "Demo service",
+          "match": "demo-service",
+          "port": 8080,
+          "note": "Synthetic example process"
+        }
+      ],
+      "links": [
+        {
+          "label": "Demo dashboard",
+          "url": "http://127.0.0.1:8080",
+          "reach": "local"
+        }
+      ],
+      "actions": [
+        {
+          "id": "acer-demo-status",
+          "label": "Demo service status",
+          "cmd": "systemctl --user is-active demo-service"
+        },
+        {
+          "id": "acer-reboot",
+          "label": "Reboot demo host",
+          "cmd": "systemctl reboot",
+          "disconnect_ok": true
+        }
+      ],
+      "exec": [
+        {
+          "id": "unit-status",
+          "label": "systemctl status",
+          "cmd": "systemctl --user status {arg} --no-pager",
+          "arg": "unit"
+        },
+        {
+          "id": "unit-log",
+          "label": "journalctl (unit)",
+          "cmd": "journalctl --user -u {arg} -n 80 --no-pager",
+          "arg": "unit"
+        },
+        {
+          "id": "container-log",
+          "label": "docker logs",
+          "cmd": "docker logs {arg} --tail 80 2>&1",
+          "arg": "container"
+        },
+        {
+          "id": "df",
+          "label": "df -h",
+          "cmd": "df -h",
+          "arg": "none"
+        },
+        {
+          "id": "free",
+          "label": "free -h",
+          "cmd": "free -h",
+          "arg": "none"
+        },
+        {
+          "id": "uptime",
+          "label": "uptime",
+          "cmd": "uptime",
+          "arg": "none"
+        }
+      ]
+    }
+  },
+  "server": {
+    "host": "127.0.0.1",
+    "port": 9090,
+    "cache_ttl_seconds": 15,
+    "collect_timeout_seconds": 40,
+    "control_timeout_seconds": 60,
+    "collect_workers": 3,
+    "metrics_retention_hours": 24,
+    "audit_max_bytes": 1000000,
+    "auth_token": null
+  },
+  "alerts": {
+    "rules": [
+      {
+        "id": "host-down",
+        "type": "host",
+        "state": "unreachable",
+        "severity": "critical"
+      },
+      {
+        "id": "svc-failed",
+        "type": "service",
+        "state": "failed",
+        "severity": "warning"
+      },
+      {
+        "id": "disk-high",
+        "type": "disk",
+        "threshold": 90,
+        "severity": "critical"
+      },
+      {
+        "id": "mem-high",
+        "type": "mem",
+        "threshold": 90,
+        "severity": "warning"
+      },
+      {
+        "id": "load-high",
+        "type": "load",
+        "threshold": null,
+        "severity": "warning"
+      },
+      {
+        "id": "scanner-stale",
+        "type": "scanner_stale",
+        "threshold_hours": 7,
+        "severity": "critical"
+      },
+      {
+        "id": "scanner-source",
+        "type": "scanner_source",
+        "min_attempts": 10,
+        "min_rate": 0.1,
+        "severity": "critical"
+      },
+      {
+        "id": "scanner-service",
+        "type": "scanner_service",
+        "severity": "critical"
+      }
+    ],
+    "webhooks": []
+  }
+}

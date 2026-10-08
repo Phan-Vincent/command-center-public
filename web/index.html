@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Command Center — macbook · hermes · acer</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">◈</span>
+      <div>
+        <h1>Command Center</h1>
+        <p class="sub">macbook · hermes · acer</p>
+      </div>
+    </div>
+    <div class="summary-strip" id="summary"></div>
+    <div class="topbar-right">
+      <span id="last-updated" class="muted"></span>
+      <span id="refresh-countdown" class="muted" aria-live="off"></span>
+      <label class="toggle" title="auto-refresh every 15s">
+        <input type="checkbox" id="auto-refresh" checked>
+        <span>auto</span>
+      </label>
+      <button id="btn-refresh" class="btn icon-btn" title="refresh now" aria-label="Refresh status now">⟳</button>
+      <button id="btn-alerts" class="btn ghost" title="alerts" aria-label="Show active alerts">⚠ <span id="alert-count"></span></button>
+      <button id="btn-audit" class="btn ghost" title="audit log">Audit</button>
+    </div>
+  </header>
+
+  <button type="button" id="alert-banner" class="alert-banner" hidden></button>
+
+  <div class="toolbar">
+    <div class="mode-toggle" role="group" aria-label="View mode">
+      <button id="mode-all" class="btn small" type="button" data-mode="all" aria-pressed="true">All</button>
+      <button id="mode-attention" class="btn small" type="button" data-mode="attention" aria-pressed="false">Attention</button>
+    </div>
+
+    <div class="host-chips" id="host-chips" role="group" aria-label="Host filter"></div>
+
+    <div class="mobile-host-wrap" id="mobile-host-wrap" hidden>
+      <label for="host-select" class="sr-only">Select host</label>
+      <select id="host-select" aria-label="Select host"></select>
+    </div>
+
+    <input id="global-search" type="search" placeholder="search services, containers, jobs, projects, links, actions…" autocomplete="off" aria-label="Search dashboard">
+
+    <div class="toolbar-actions">
+      <button id="btn-density" class="btn ghost small" type="button" title="toggle density" aria-label="Toggle density">compact</button>
+      <button id="btn-collapse" class="btn ghost small" type="button">collapse all</button>
+    </div>
+  </div>
+
+  <section id="issues-panel" class="issues-panel" aria-labelledby="issues-title">
+    <div class="issues-head">
+      <h2 id="issues-title">Issues</h2>
+      <span id="issues-count" class="issues-count" aria-live="polite">0</span>
+    </div>
+    <ul id="issues-list" class="issues-list"></ul>
+  </section>
+
+  <div id="fleet" class="fleet"></div>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <!-- existing drawers -->
+  <div class="drawer" id="audit-drawer" hidden>
+    <div class="drawer-head">
+      <h2>Control audit log</h2>
+      <button class="btn ghost small drawer-close" type="button" aria-label="Close audit log">✕</button>
+    </div>
+    <div class="tbl-wrap"><table class="tbl"><thead><tr><th>time</th><th>host</th><th>action</th><th>cmd</th><th>rc</th></tr></thead><tbody id="audit-body"></tbody></table></div>
+  </div>
+
+  <div class="drawer" id="alerts-drawer" hidden>
+    <div class="drawer-head">
+      <h2>Active alerts</h2>
+      <button class="btn ghost small drawer-close" type="button" aria-label="Close alerts">✕</button>
+    </div>
+    <div id="alerts-body"></div>
+  </div>
+
+  <div class="drawer" id="logs-drawer" hidden>
+    <div class="drawer-head">
+      <h2 id="logs-title">Logs</h2>
+      <div class="logs-actions">
+        <button id="btn-logs-refresh" class="btn ghost small" type="button" aria-label="Refresh logs">⟳</button>
+        <button id="btn-logs-close" class="btn ghost small" type="button" aria-label="Close logs">✕</button>
+      </div>
+    </div>
+    <pre id="logs-body" class="log-view"></pre>
+  </div>
+
+  <!-- host action dialog -->
+  <div class="backdrop" id="action-backdrop" hidden></div>
+  <div class="drawer dialog" id="action-drawer" role="dialog" aria-modal="true" aria-labelledby="action-drawer-title" hidden>
+    <div class="drawer-head">
+      <h2 id="action-drawer-title">Host actions</h2>
+      <button id="action-drawer-close" class="btn ghost small" type="button" aria-label="Close host actions">✕</button>
+    </div>
+    <div id="action-drawer-body"></div>
+    <div id="action-output" class="action-output" aria-live="polite" aria-atomic="true"></div>
+  </div>
+
+  <footer class="foot muted">
+    Command Center · stdlib Python + vanilla JS (zero deps) · allowlisted &amp; audited control ·
+    optional token auth · binds 127.0.0.1
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
