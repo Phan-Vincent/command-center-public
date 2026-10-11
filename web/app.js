@@ -468,11 +468,14 @@ function renderPokemon(h, id) {
   const rr = drift.repository_runtime || {};
   const paper = p.paper_experiment || {};
   const services = p.services || {};
+  const post = p.last_discord_post || {};
+  const quiet = post.runs_since ? ` · ${post.runs_since} run${post.runs_since === 1 ? "" : "s"} since` : "";
   return section(secId(id, "pokemon"), "Pokémon scanner health", "pokemon", `
     <div class="stat-grid">
       <div class="stat-row"><span class="muted">last successful run</span><span class="mono">${esc(p.last_success_at || "none")}</span></div>
       <div class="stat-row"><span class="muted">next timer</span><span class="mono">${esc(p.next_scheduled_run || "unknown")}</span></div>
       <div class="stat-row"><span class="muted">last run</span><span>${chip(run.status || "unknown")} <span class="mono">${esc(run.ended_at || run.started_at || "")}</span></span></div>
+      <div class="stat-row"><span class="muted">last Discord post</span><span><span class="mono">${esc(post.at || "never")}</span>${esc(quiet)}</span></div>
       <div class="stat-row"><span class="muted">Discord handler / tunnel</span><span>${chip(services.discord_handler || "unknown")} ${chip(services.tunnel || "unknown")}</span></div>
       <div class="stat-row"><span class="muted">eBay browser</span><span>${chip(p.ebay_auth?.state || "unknown")} ${esc(p.ebay_auth?.basis || "")}</span></div>
       <div class="stat-row"><span class="muted">paper experiment</span><span>${chip(paper.status || "none")} <span class="mono">${esc(paper.experiment_id || "")}</span></span></div>

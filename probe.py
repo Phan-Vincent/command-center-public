@@ -359,6 +359,21 @@ def _drift_counts(left, right):
     }
 
 
+def _last_discord_post(conn):
+    """Latest sent Discord post and how many completed runs have posted nothing since."""
+    last = conn.execute(
+        "SELECT MAX(sent_at) FROM discord_outbox WHERE status = 'sent'"
+    ).fetchone()[0]
+    runs_since = conn.execute(
+        """
+        SELECT COUNT(*) FROM scanner_runs
+        WHERE ended_at IS NOT NULL AND dry_run = 0 AND started_at > ?
+        """,
+        (last or "",),
+    ).fetchone()[0]
+    return {"at": last, "runs_since": runs_since}
+
+
 def pokemon_scanner_health():
     """Best-effort, read-only scanner health for the hermes dashboard."""
     if HOSTNAME != "peeruser-Dell":
@@ -430,6 +445,7 @@ def pokemon_scanner_health():
             (since,),
         ).fetchall()
         result["source_failures"] = [dict(row) for row in failures]
+        result["last_discord_post"] = _last_discord_post(conn)
         conn.close()
     except Exception as exc:  # noqa: BLE001
         result["errors"].append(f"ops: {exc}")

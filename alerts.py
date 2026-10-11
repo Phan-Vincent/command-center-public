@@ -98,6 +98,15 @@ def _evaluate_host(host, h, rules):
                     alerts.append({"host": host, "rule": rule.get("id", "pokemon-source"),
                                    "severity": sev,
                                    "message": f"{host}: Pokémon {source} yield {usable}/{active} ({rate:.1%})"})
+        elif t == "pokemon_quiet":
+            scanner = h.get("pokemon_scanner") or {}
+            post = scanner.get("last_discord_post")
+            min_runs = int(_num(rule.get("min_runs", 8)) or 8)
+            if scanner.get("available") and post and (_num(post.get("runs_since")) or 0) >= min_runs:
+                # Keyed on the last post time (not the run count) so it stays one alert per streak.
+                alerts.append({"host": host, "rule": rule.get("id", "pokemon-quiet"),
+                               "severity": sev,
+                               "message": f"{host}: no Pokémon Discord post since {post.get('at') or 'ever'}"})
         elif t == "pokemon_service":
             scanner = h.get("pokemon_scanner") or {}
             for component, state in (scanner.get("services") or {}).items():

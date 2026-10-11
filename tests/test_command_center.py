@@ -3,6 +3,7 @@
 
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import time
@@ -206,6 +207,51 @@ class PokemonHealthTests(unittest.TestCase):
         found = alerts.evaluate(status, cfg)
         self.assertEqual(len(found), 1)
         self.assertIn("no recorded successful run", found[0]["message"])
+
+    def test_quiet_alert_fires_at_threshold_with_stable_message(self):
+        def scan(runs_since):
+            return {"hosts": {"hermes": {"reachable": True, "pokemon_scanner": {
+                "available": True,
+                "last_discord_post": {"at": "2026-10-10T07:03:29+00:00", "runs_since": runs_since},
+            }}}}
+        cfg = {"alerts": {"rules": [
+            {"id": "pokemon-quiet", "type": "pokemon_quiet", "min_runs": 8, "severity": "warning"},
+        ], "webhooks": []}}
+        self.assertEqual(alerts.evaluate(scan(7), cfg), [])
+        first = alerts.evaluate(scan(8), cfg)
+        later = alerts.evaluate(scan(9), cfg)
+        self.assertEqual(len(first), 1)
+        self.assertIn("since 2026-10-10T07:03:29", first[0]["message"])
+        self.assertEqual(first[0]["key"], later[0]["key"])
+        self.assertEqual(first[0]["since"], later[0]["since"])
+
+    def test_last_discord_post_counts_quiet_runs_since(self):
+        conn = sqlite3.connect(":memory:")
+        conn.executescript("""
+            CREATE TABLE discord_outbox (status TEXT, sent_at TEXT);
+            CREATE TABLE scanner_runs (started_at TEXT, ended_at TEXT, dry_run INTEGER);
+            INSERT INTO discord_outbox VALUES
+                ('sent', '2026-10-10T07:03:29+00:00'),
+                ('sent', '2026-10-09T01:03:00+00:00'),
+                ('failed', NULL);
+            INSERT INTO scanner_runs VALUES
+                ('2026-10-10T07:00:00+00:00', '2026-10-10T07:03:30+00:00', 0),
+                ('2026-10-10T13:00:00+00:00', '2026-10-10T13:03:00+00:00', 0),
+                ('2026-10-10T19:00:00+00:00', '2026-10-10T19:03:00+00:00', 1),
+                ('2026-10-11T01:00:00+00:00', '2026-10-11T01:03:00+00:00', 0),
+                ('2026-10-11T07:00:00+00:00', NULL, 0);
+        """)
+        self.assertEqual(probe._last_discord_post(conn),
+                         {"at": "2026-10-10T07:03:29+00:00", "runs_since": 2})
+
+    def test_last_discord_post_never_sent(self):
+        conn = sqlite3.connect(":memory:")
+        conn.executescript("""
+            CREATE TABLE discord_outbox (status TEXT, sent_at TEXT);
+            CREATE TABLE scanner_runs (started_at TEXT, ended_at TEXT, dry_run INTEGER);
+            INSERT INTO scanner_runs VALUES ('2026-10-11T07:00:00+00:00', '2026-10-11T07:03:00+00:00', 0);
+        """)
+        self.assertEqual(probe._last_discord_post(conn), {"at": None, "runs_since": 1})
 
     def test_drift_inventory_excludes_state_and_credentials(self):
         with tempfile.TemporaryDirectory() as td:
