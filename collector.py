@@ -69,6 +69,11 @@ def validate_config(cfg=None):
     for i, r in enumerate((cfg.get("alerts") or {}).get("rules", [])):
         if not r.get("type"):
             problems.append(f"alerts.rules[{i}]: missing 'type'")
+    for i, wh in enumerate((cfg.get("alerts") or {}).get("webhooks", [])):
+        if not (wh.get("url") or wh.get("url_file")):
+            problems.append(f"alerts.webhooks[{i}]: needs 'url' or 'url_file'")
+        if wh.get("type", "generic") not in ("discord", "slack", "generic"):
+            problems.append(f"alerts.webhooks[{i}]: 'type' must be discord|slack|generic")
     return problems
 
 

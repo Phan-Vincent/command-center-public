@@ -156,6 +156,11 @@
       { "id": "pokemon-service", "type": "pokemon_service", "severity": "critical" },
       { "id": "pokemon-quiet", "type": "pokemon_quiet", "min_runs": 8, "severity": "warning" }
     ],
-    "webhooks": []
-  }
+    "notify": { "min_active_seconds": 120, "state_file": "data/alert_state.json" },
+    "webhooks": [
+      { "id": "discord", "type": "discord", "url_file": "~/.config/command-center/discord-webhook",
+        "severities": ["critical"], "rules": ["pokemon-quiet"] }
+    ]
+  },
+  "healthcheck": { "interval_seconds": 120, "fail_threshold": 2, "stale_after_seconds": 300, "timeout_seconds": 10 }
 }

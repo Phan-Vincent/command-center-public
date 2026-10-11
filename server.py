@@ -20,6 +20,7 @@ Usage:
 import argparse
 import copy
 import json
+import os
 import threading
 import time
 import urllib.parse
@@ -123,6 +124,15 @@ def refresh_status(force=False, cfg=None):
         return STATE["status"]
 
 
+def health():
+    """Liveness for healthcheck.py: answers fast and shows whether collection is advancing."""
+    with STATE["lock"]:
+        last = STATE["last_full"]
+        collecting = STATE["collecting"]
+    return {"ok": True, "pid": os.getpid(), "collecting": collecting,
+            "collection_age_seconds": round(time.time() - last, 1) if last else None}
+
+
 def _background_loop(cfg, interval):
     while True:
         try:
@@ -203,6 +213,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, refresh_status(force=force))
         if path == "/api/config":
             return self._send(200, public_config())
+        if path == "/api/health":
+            return self._send(200, health())
         if path == "/api/metrics":
             q = self._qdict(qs)
             try:

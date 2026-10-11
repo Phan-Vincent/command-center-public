@@ -154,8 +154,7 @@ class CollectorTests(unittest.TestCase):
 
 class PokemonHealthTests(unittest.TestCase):
     def tearDown(self):
-        alerts._STATE.clear()
-        alerts._NOTIFIED.clear()
+        alerts.reset_state()
 
     def test_source_alert_is_per_provider_not_aggregate(self):
         status = {"hosts": {"hermes": {

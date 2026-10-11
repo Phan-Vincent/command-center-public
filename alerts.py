@@ -1,15 +1,36 @@
 #!/usr/bin/env python3
-"""alerts.py — config-driven alert engine + optional webhook notifications."""
+"""alerts.py — config-driven alert engine + webhook notifications.
+
+Notification lifecycle (per alert key = host|rule|subject, per webhook):
+  * fire once the alert has been active for `notify.min_active_seconds`;
+  * never re-send while it stays active, including across server restarts
+    (state persists to `notify.state_file`);
+  * once it has been gone for `min_active_seconds`, send one RESOLVED message
+    to every webhook that was told it fired. Alerts on an unreachable host are
+    held rather than resolved, since their facts can't be confirmed;
+  * failed sends are retried on later evaluations, after a short per-webhook
+    backoff.
+"""
 
 import json
+import os
 import threading
 import time
-import urllib.request
 from datetime import datetime, timezone
+from pathlib import Path
 
-# alert key -> first-seen epoch (in-memory; resets on restart)
+import notify
+
+BASE = Path(__file__).resolve().parent
+RETRY_BACKOFF_SECONDS = 60
+RESOLVED_TTL_SECONDS = 24 * 3600  # give up on undeliverable recoveries after a day
+
+# key -> {"alert": {...}, "first_seen": epoch, "notified": [webhook ids], "missing_since"?: epoch}
 _STATE = {}
-_NOTIFIED = set()
+# key -> {"alert": {...}, "first_seen", "resolved_at", "pending": [webhook ids]}
+_RESOLVED = {}
+_BACKOFF = {}  # webhook id -> epoch before which it is skipped
+_LOADED = {"path": None, "saved": None}
 _LOCK = threading.Lock()
 
 
@@ -39,6 +60,7 @@ def _evaluate_host(host, h, rules):
     for rule in rules:
         t = rule.get("type")
         sev = rule.get("severity", "warning")
+        first = len(alerts)
         if t == "host":
             if rule.get("state") == "unreachable" and not h.get("reachable"):
                 alerts.append({"host": host, "rule": rule.get("id", "host-down"),
@@ -48,7 +70,7 @@ def _evaluate_host(host, h, rules):
             for u in (h.get("services") or []):
                 if u.get("state") == state:
                     alerts.append({"host": host, "rule": rule.get("id", "svc-failed"),
-                                   "severity": sev,
+                                   "severity": sev, "subject": u.get("name"),
                                    "message": f"{host}: {u.get('name')} is {state}"})
         elif t == "disk":
             d = (h.get("disk") or [{}])[0]
@@ -96,7 +118,7 @@ def _evaluate_host(host, h, rules):
                 rate = usable / active if active else None
                 if active >= min_attempts and rate is not None and min_rate is not None and rate < min_rate:
                     alerts.append({"host": host, "rule": rule.get("id", "pokemon-source"),
-                                   "severity": sev,
+                                   "severity": sev, "subject": source,
                                    "message": f"{host}: Pokémon {source} yield {usable}/{active} ({rate:.1%})"})
         elif t == "pokemon_quiet":
             scanner = h.get("pokemon_scanner") or {}
@@ -112,69 +134,146 @@ def _evaluate_host(host, h, rules):
             for component, state in (scanner.get("services") or {}).items():
                 if state != "active":
                     alerts.append({"host": host, "rule": rule.get("id", "pokemon-service"),
-                                   "severity": sev,
+                                   "severity": sev, "subject": component,
                                    "message": f"{host}: Pokémon {component} is {state or 'unknown'}"})
+        for a in alerts[first:]:
+            a["type"] = t
     return alerts
 
 
-def evaluate(status, cfg):
-    """Return the current active alerts, tracking first-seen and dispatching
-    webhooks on new (rising-edge) transitions."""
-    rules = (cfg.get("alerts") or {}).get("rules", [])
-    now = time.time()
+
+
+def reset_state():
+    """Forget all in-memory alert state (tests)."""
+    with _LOCK:
+        _STATE.clear()
+        _RESOLVED.clear()
+        _BACKOFF.clear()
+        _LOADED.update(path=None, saved=None)
+
+
+def _key(a):
+    return f"{a['host']}|{a['rule']}|{a.get('subject') or ''}"
+
+
+def _iso(epoch):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def _state_path(notify_cfg):
+    path = notify_cfg.get("state_file")
+    if not path:
+        return None
+    path = Path(os.path.expanduser(path))
+    return path if path.is_absolute() else BASE / path
+
+
+def _load(path):
+    if path == _LOADED["path"]:
+        return
+    _STATE.clear()
+    _RESOLVED.clear()
+    _LOADED.update(path=path, saved=None)
+    if path is None:
+        return
+    try:
+        raw = path.read_text(encoding="utf-8")
+        data = json.loads(raw)
+        _STATE.update(data.get("active") or {})
+        _RESOLVED.update(data.get("resolved") or {})
+        _LOADED["saved"] = raw
+    except (OSError, ValueError):
+        pass  # first run or unreadable: start clean
+
+
+def _save(path):
+    if path is None:
+        return
+    raw = json.dumps({"active": _STATE, "resolved": _RESOLVED}, indent=1, sort_keys=True)
+    if raw == _LOADED["saved"]:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(raw, encoding="utf-8")
+        os.replace(tmp, path)
+        _LOADED["saved"] = raw
+    except OSError as e:
+        print(f"[alerts] could not save state: {e}", flush=True)
+
+
+def evaluate(status, cfg, now=None):
+    """Return the currently active alerts and deliver any due notifications."""
+    acfg = cfg.get("alerts") or {}
+    rules = acfg.get("rules", [])
+    webhooks = acfg.get("webhooks") or []
+    notify_cfg = acfg.get("notify") or {}
+    debounce = _num(notify_cfg.get("min_active_seconds", 0)) or 0
+    now = time.time() if now is None else now
+    hosts = status.get("hosts", {})
     raw = []
-    for host, h in status.get("hosts", {}).items():
+    for host, h in hosts.items():
         raw.extend(_evaluate_host(host, h, rules))
 
-    active = []
-    new_alerts = []
-    with _LOCK:
-        current_keys = set()
+    with _LOCK:  # held across sends: evaluations are serialized, so nothing double-sends
+        path = _state_path(notify_cfg)
+        _load(path)
+
+        current = {}
         for a in raw:
-            key = f"{a['host']}|{a['rule']}|{a['message']}"
-            a["key"] = key
-            if key not in _STATE:
-                _STATE[key] = now
-                new_alerts.append(a)
-            a["since"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(_STATE[key]))
-            current_keys.add(key)
-            active.append(a)
-        # Drop alerts that are no longer firing so they can re-notify next time.
-        for key in list(_STATE.keys()):
-            if key not in current_keys:
-                _STATE.pop(key, None)
-                _NOTIFIED.discard(key)
+            key = a["key"] = _key(a)
+            entry = _STATE.setdefault(key, {"first_seen": now, "notified": []})
+            entry["alert"] = {k: a.get(k) for k in ("host", "rule", "type", "severity", "message")}
+            entry.pop("missing_since", None)
+            a["since"] = _iso(entry["first_seen"])
+            current[key] = a
 
-    # Notify only alerts that haven't been sent yet (rising edge).
-    to_send = []
-    with _LOCK:
-        for a in new_alerts:
-            if a["key"] not in _NOTIFIED:
-                _NOTIFIED.add(a["key"])
-                to_send.append(a)
-    for a in to_send:
-        _dispatch(a, cfg)
-    return active
+        for key, entry in list(_STATE.items()):
+            if key in current:
+                continue
+            if not entry["notified"]:
+                del _STATE[key]  # never announced, so nothing to resolve
+                continue
+            alert = entry["alert"]
+            if alert.get("type") != "host" and hosts.get(alert["host"], {}).get("reachable") is False:
+                continue  # can't confirm recovery while the host is unreachable
+            entry.setdefault("missing_since", now)
+            if now - entry["missing_since"] < debounce:
+                continue
+            del _STATE[key]
+            _RESOLVED[key] = {"alert": alert, "first_seen": entry["first_seen"],
+                              "resolved_at": now, "pending": list(entry["notified"])}
 
+        for key, r in list(_RESOLVED.items()):
+            if now - r["resolved_at"] > RESOLVED_TTL_SECONDS:
+                del _RESOLVED[key]
 
-def _dispatch(alert, cfg):
-    webhooks = (cfg.get("alerts") or {}).get("webhooks", [])
-    for wh in webhooks:
-        url = wh.get("url")
-        if not url:
-            continue
-        kind = wh.get("type", "generic")
-        payload = None
-        if kind == "discord":
-            payload = json.dumps({"content": f"🚨 **{alert['severity']}** — {alert['message']}"}).encode()
-        elif kind == "slack":
-            payload = json.dumps({"text": f"*{alert['severity']}*: {alert['message']}"}).encode()
-        else:  # ntfy / generic
-            payload = alert["message"].encode()
-        try:
-            req = urllib.request.Request(url, data=payload, method="POST")
-            if kind in ("discord", "slack"):
-                req.add_header("Content-Type", "application/json")
-            urllib.request.urlopen(req, timeout=5)
-        except Exception:  # noqa: BLE001
-            pass  # notifications are best-effort; never break the dashboard
+        by_id = {notify.webhook_id(wh, i): wh for i, wh in enumerate(webhooks)}
+        sends = []  # (kind, key, webhook id, text)
+        for key, entry in _STATE.items():
+            if key not in current or now - entry["first_seen"] < debounce:
+                continue
+            for wid, wh in by_id.items():
+                if wid not in entry["notified"] and notify.matches(wh, entry["alert"]):
+                    sends.append(("fire", key, wid, notify.fire_text(entry["alert"])))
+        for key, r in _RESOLVED.items():
+            r["pending"] = [wid for wid in r["pending"] if wid in by_id]
+            for wid in r["pending"]:
+                sends.append(("resolved", key, wid,
+                              notify.resolved_text(r["alert"], r["resolved_at"] - r["first_seen"])))
+
+        for kind, key, wid, text in sends:
+            if _BACKOFF.get(wid, 0) > now:
+                continue
+            if not notify.send(by_id[wid], text):
+                _BACKOFF[wid] = now + RETRY_BACKOFF_SECONDS
+                continue
+            if kind == "fire":
+                _STATE[key]["notified"].append(wid)
+            else:
+                _RESOLVED[key]["pending"].remove(wid)
+        for key in [k for k, r in _RESOLVED.items() if not r["pending"]]:
+            del _RESOLVED[key]
+
+        _save(path)
+    return list(current.values())

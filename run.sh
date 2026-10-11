@@ -6,20 +6,37 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PORT="${2:-9090}"
 LOG="$DIR/logs/server.log"
 PIDFILE="$DIR/logs/server.pid"
-LABEL="com.vincentphan.command-center"
-PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+# CC_LABEL lets a second checkout run its own agents (e.g. a test instance on another port).
+LABEL="${CC_LABEL:-com.vincentphan.command-center}"
+HC_LABEL="$LABEL.healthcheck"
+AGENTS="$HOME/Library/LaunchAgents"
+PLIST="$AGENTS/$LABEL.plist"
+HC_PLIST="$AGENTS/$HC_LABEL.plist"
+HC_LOG="$DIR/logs/healthcheck.log"
 DOMAIN="gui/$(id -u)"
 
-# Once `install` has run, launchd owns the process (KeepAlive restarts it on
-# crash and RunAtLoad starts it at login); start/stop/restart/status defer to it.
+# Once `install` has run, launchd owns the dashboard (KeepAlive restarts it on
+# crash and RunAtLoad starts it at login) plus a separate healthcheck job that
+# notifies when the dashboard stops answering. start/stop/restart/status defer
+# to launchd and always handle both jobs, so a deliberate stop never pages.
 agent_installed() { [ -f "$PLIST" ]; }
-agent_loaded() { launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; }
+loaded() { launchctl print "$DOMAIN/$1" >/dev/null 2>&1; }
+agent_loaded() { loaded "$LABEL"; }
 agent_pid() { launchctl print "$DOMAIN/$LABEL" 2>/dev/null | awk '$1 == "pid" {print $3}'; }
+load_agents() {
+  loaded "$LABEL" || launchctl bootstrap "$DOMAIN" "$PLIST"
+  if [ -f "$HC_PLIST" ] && ! loaded "$HC_LABEL"; then launchctl bootstrap "$DOMAIN" "$HC_PLIST"; fi
+}
+unload_agents() {
+  if loaded "$HC_LABEL"; then launchctl bootout "$DOMAIN/$HC_LABEL"; fi
+  if loaded "$LABEL"; then launchctl bootout "$DOMAIN/$LABEL"; fi
+}
 
-write_plist() {
-  local py
+write_plists() {
+  local py interval
   py="$(command -v python3)"
-  mkdir -p "$(dirname "$PLIST")" "$DIR/logs"
+  interval="$("$py" -c 'import json,sys; print(int((json.load(open(sys.argv[1])).get("healthcheck") or {}).get("interval_seconds", 120)))' "$DIR/config.json")"
+  mkdir -p "$AGENTS" "$DIR/logs"
   cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -43,14 +60,33 @@ write_plist() {
 </dict>
 </plist>
 EOF
-  plutil -lint "$PLIST" >/dev/null
+  cat > "$HC_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$HC_LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$py</string>
+    <string>$DIR/healthcheck.py</string>
+    <string>--port</string><string>$PORT</string>
+  </array>
+  <key>WorkingDirectory</key><string>$DIR</string>
+  <key>StartInterval</key><integer>$interval</integer>
+  <key>StandardOutPath</key><string>$HC_LOG</string>
+  <key>StandardErrorPath</key><string>$HC_LOG</string>
+</dict>
+</plist>
+EOF
+  plutil -lint "$PLIST" "$HC_PLIST" >/dev/null
 }
 
 cmd="${1:-start}"
 case "$cmd" in
   start)
     if agent_installed; then
-      agent_loaded || launchctl bootstrap "$DOMAIN" "$PLIST"
+      load_agents
       launchctl kickstart "$DOMAIN/$LABEL"
       echo "Command Center running under launchd (pid $(agent_pid)) — http://127.0.0.1:$PORT/"
       exit 0
@@ -68,8 +104,8 @@ case "$cmd" in
     ;;
   stop)
     if agent_loaded; then
-      launchctl bootout "$DOMAIN/$LABEL"
-      echo "stopped (launchd agent unloaded until next login or ./run.sh start)"
+      unload_agents
+      echo "stopped dashboard + healthcheck (unloaded until next login or ./run.sh start)"
     elif [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
       kill "$(cat "$PIDFILE")" && rm -f "$PIDFILE"
       echo "stopped"
@@ -88,6 +124,7 @@ case "$cmd" in
   status)
     if agent_loaded; then
       echo "running under launchd (pid $(agent_pid)) — http://127.0.0.1:$PORT/"
+      if loaded "$HC_LABEL"; then echo "healthcheck loaded (log: $HC_LOG)"; else echo "healthcheck NOT loaded — ./run.sh install"; fi
     elif agent_installed; then
       echo "launchd agent installed but not loaded — ./run.sh start"
     elif [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
@@ -101,16 +138,17 @@ case "$cmd" in
       kill "$(cat "$PIDFILE")"
     fi
     rm -f "$PIDFILE"
-    agent_loaded && launchctl bootout "$DOMAIN/$LABEL"
-    write_plist
-    launchctl bootstrap "$DOMAIN" "$PLIST"
+    unload_agents
+    write_plists
+    load_agents
     echo "installed $PLIST (starts at login, restarts on crash)"
-    echo "log: $LOG"
+    echo "installed $HC_PLIST (checks /api/health on an interval, notifies if down)"
+    echo "logs: $LOG, $HC_LOG"
     ;;
   uninstall)
-    agent_loaded && launchctl bootout "$DOMAIN/$LABEL"
-    rm -f "$PLIST"
-    echo "uninstalled launchd agent"
+    unload_agents
+    rm -f "$PLIST" "$HC_PLIST"
+    echo "uninstalled launchd agents"
     ;;
   open)
     open "http://127.0.0.1:$PORT/" 2>/dev/null || echo "run: open http://127.0.0.1:$PORT/"
@@ -119,7 +157,7 @@ case "$cmd" in
     python3 -m unittest discover -s "$DIR/tests" -p "test_*.py" -v
     ;;
   health)
-    curl -fsS "http://127.0.0.1:$PORT/api/status" >/dev/null && echo "ok: server responding" || echo "not responding on $PORT"
+    curl -fsS "http://127.0.0.1:$PORT/api/health" && echo || echo "not responding on $PORT"
     ;;
   *)
     echo "usage: $0 {start|stop|restart|status|install|uninstall|open|test|health} [port]"

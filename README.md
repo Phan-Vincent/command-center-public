@@ -58,7 +58,7 @@ layout shows one selected host at a time while keeping the global issue queue.
 
 Auto-refreshes every 15 s (toggleable and paused while the page is hidden);
 manual refresh forces a fresh fleet collection. Alerts are evaluated on every
-collection and dispatched to configured webhooks on first fire.
+collection and sent to configured webhooks (see Notifications).
 
 ## API
 
@@ -69,6 +69,7 @@ collection and dispatched to configured webhooks on first fire.
 | `GET /api/config` | hosts + actions + exec metadata (auth/webhook secrets omitted) |
 | `GET /api/metrics?host=&metric=&limit=` | time-series (load1/5/15, mem_used_gb, disk_use_pct, …) |
 | `GET /api/alerts` | active alerts |
+| `GET /api/health` | liveness + seconds since the last completed collection (used by `healthcheck.py`) |
 | `GET /api/logs?host=&type=unit|container&target=&tail=` | tail journalctl / docker logs (whitelisted) |
 | `POST /api/control` | `{host, action_id}` → run allowlisted action |
 | `POST /api/exec` | `{host, exec_id, arg}` → run allowlisted read-only command |
@@ -130,8 +131,12 @@ encryption, so no boot-time passphrase is required.
     { "id": "mem-high",     "type": "mem",     "threshold": 90,        "severity": "warning" },
     { "id": "load-high",    "type": "load",    "threshold": null,      "severity": "warning" }
   ],
-  "webhooks": [ { "url": "https://discord.com/api/webhooks/...", "type": "discord" } ]
+  "notify": { "min_active_seconds": 120, "state_file": "data/alert_state.json" },
+  "webhooks": [ { "id": "discord", "type": "discord",
+                  "url_file": "~/.config/command-center/discord-webhook",
+                  "severities": ["critical"], "rules": ["pokemon-quiet"] } ]
 },
+"healthcheck": { "interval_seconds": 120, "fail_threshold": 2, "stale_after_seconds": 300 },
 "hosts": {
   "myhost": {
     "label": "myhost", "role": "homelab", "connect": "ssh",
@@ -148,6 +153,37 @@ Alert `type`: `host` (unreachable), `service` (a systemd state like `failed`),
 `disk`/`mem` (percent ≥ threshold), `load` (load1 ≥ threshold, or ≥ cores when
 null). `webhooks` support `discord`, `slack`, and generic (ntfy) bodies.
 
+### Notifications
+
+A webhook receives every alert unless it lists `severities` and/or `rules`, in
+which case it gets alerts matching either. Keep the URL out of git with
+`url_file` (a one-line file, `chmod 600`); `url` also works.
+
+Each alert (host + rule + unit/source) notifies **once** after it has been
+active for `notify.min_active_seconds`, and sends one **RESOLVED** message once
+it has been gone that long. Delivery state is saved to `notify.state_file`, so
+restarts don't re-send; failed sends retry after a minute. Alerts on an
+unreachable host are held until the host answers rather than reported as
+resolved.
+
+`./run.sh install` also installs `healthcheck.py` as a second launchd job. It
+polls `/api/health` every `healthcheck.interval_seconds` and, after
+`fail_threshold` failures in a row (no answer, or no completed collection for
+`stale_after_seconds`), sends one critical "dashboard is down" message to the
+webhooks, then a RESOLVED message when it answers again. `./run.sh stop`
+unloads both jobs, so a deliberate stop doesn't notify.
+
+Discord setup: Server Settings → Integrations → Webhooks → New Webhook, copy
+the URL, then:
+
+```bash
+mkdir -p ~/.config/command-center && umask 077 && pbpaste > ~/.config/command-center/discord-webhook
+python3 healthcheck.py --test   # sends a test message to every webhook
+```
+
+The dashboard runs only while you're logged in (it's a LaunchAgent), so it
+starts after a reboot at login, not before.
+
 ## Files
 
 ```
@@ -155,7 +191,9 @@ config.json      fleet definition (hosts, actions, exec, alerts, server)
 probe.py         remote status probe (piped over ssh, stdlib only)
 collector.py     local macOS facts + ssh orchestration → JSON
 metrics.py       sqlite time-series store (data/metrics.db)
-alerts.py        rule engine + webhook dispatch
+alerts.py        rule engine + notification lifecycle (dedupe, resolve, persistence)
+notify.py        webhook delivery shared by alerts.py and healthcheck.py
+healthcheck.py   independent launchd job: notifies when the dashboard is down
 control.py       allowlisted action/exec execution + redacted audit log
 server.py        stdlib HTTP server + JSON API
 web/             dashboard UI (index.html, app.js, style.css)
