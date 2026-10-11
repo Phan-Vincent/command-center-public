@@ -25,6 +25,8 @@ cd ~/command-center
 ./run.sh stop
 ./run.sh test           # run the unittest suite
 ./run.sh health         # is the server responding?
+./run.sh install        # run under launchd: start at login, restart on crash
+./run.sh uninstall      # remove the launchd agent
 ```
 
 Or directly: `python3 server.py --port 9090 --open`
@@ -158,7 +160,7 @@ control.py       allowlisted action/exec execution + redacted audit log
 server.py        stdlib HTTP server + JSON API
 web/             dashboard UI (index.html, app.js, style.css)
 tests/           unittest suite + live smoke test
-run.sh           start/stop/status/open/test/health helper
+run.sh           start/stop/status/install/open/test/health helper
 setup/           one-time host setup (polkit reboot rule, no sudo)
 plugins/         Claude Code plugins: deepseek-delegate (/delegate → DeepSeek via Reasonix),
                  reasonix-orchestrator (Mac stdio MCP server; also a Codex plugin)
