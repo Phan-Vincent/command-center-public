@@ -15,7 +15,8 @@ scripts/delegate.py run   (one Bash call per sub-task)
    1. guardrails: clean tree; auto-branch off main/master → delegate/<slug>-xxxx
    2. reasonix run --model deepseek-flash --permission-mode workspace-write --output-format json  (spec on stdin)
    3. run YOUR --verify commands (the model's own "tests pass" is not trusted);
-      anything they write (caches, fixtures) is reverted, never committed
+      new untracked files they create (caches) are deleted; their edits to tracked
+      files (formatter, regenerated fixtures) are kept and reported as verify_edits
    4. pass → git commit "delegate(flash): <title>"         fail → retry with test output
       (a pass that changed files outside --files is stashed as needs_human, not committed)
    5. ladder: flash, flash, pro, pro → then stash + "needs_human"
@@ -261,5 +262,5 @@ python3 -m unittest discover -s plugins/deepseek-delegate/tests -v
 The tests cover the success path, the Flash→Pro escalation, stash on
 exhaustion, fatal credential and unknown-model errors, the dirty-tree block,
 security flagging, fenced-JSON parsing, read-only mode, scope enforcement
-(out-of-scope edits block the commit; verify by-products are reverted), the
+(out-of-scope edits block the commit; verify caches are deleted, verify edits kept), the
 price fallback, and stats.

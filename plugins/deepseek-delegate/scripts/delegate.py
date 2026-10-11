@@ -18,6 +18,7 @@ Pure Python 3 standard library. See ../README.md.
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -339,20 +340,37 @@ def in_scope(path, files):
     return any(f == "." or path == f or path.startswith(f + "/") for f in files)
 
 
-def undo_side_effects(git, before):
-    """Revert what the verify commands created or changed (caches, fixtures, ...).
+def file_digest(root, path):
+    try:
+        return hashlib.sha1((Path(root) / path).read_bytes()).hexdigest()
+    except OSError:  # deleted
+        return None
 
-    What gets committed must be exactly the tree verify checked. The run starts
-    on a clean tree and these paths were untouched before verify ran, so
-    restoring HEAD (or deleting a new file) puts back exactly what was there.
-    Returns the reverted paths."""
-    touched = [p for p in git.dirty_paths() if p not in before]
-    for p in touched:
-        if git("ls-tree", "--name-only", "HEAD", "--", p, check=False):
-            git("checkout", "-q", "HEAD", "--", p)
+
+def snapshot(git):
+    """{path: content digest} of every changed path, taken before verify runs."""
+    return {p: file_digest(git.root, p) for p in git.dirty_paths()}
+
+
+def settle_verify_writes(git, before):
+    """Sort out what the verify commands wrote since `snapshot()`.
+
+    New untracked files (caches, build output) are deleted: the run started on
+    a clean tree, so they are pure by-products. Edits to tracked files or to the
+    worker's files (a formatter, regenerated fixtures) are kept, because the
+    tests ran on them; they get the same --files check as the worker's changes.
+    Returns (removed, edited)."""
+    removed, edited = [], []
+    for p in git.dirty_paths():
+        if p in before:
+            if file_digest(git.root, p) != before[p]:
+                edited.append(p)
+        elif git("ls-tree", "--name-only", "HEAD", "--", p, check=False):
+            edited.append(p)
         else:
             (Path(git.root) / p).unlink(missing_ok=True)
-    return touched
+            removed.append(p)
+    return removed, edited
 
 
 def run_verify(commands, root, timeout):
@@ -491,7 +509,7 @@ def cmd_run(args):
     totals = {}   # currency -> cost
     attempts_log = []
     last = {}
-    side_effects = set()   # verify by-products, reverted after every verify run
+    verify_removed, verify_edits = set(), set()   # see settle_verify_writes()
 
     for n, alias in enumerate(models, start=1):
         prompt = build_prompt(task, title, files, verify, args.read_only, feedback, cfg)
@@ -516,9 +534,11 @@ def cmd_run(args):
         elif report and str(report.get("status", "")).lower() == "failed":
             fail_reason = "worker reported status=failed"
         if fail_reason is None and not args.read_only:
-            before = set(git.dirty_paths())
+            before = snapshot(git)
             verify_ok, verify_results = run_verify(verify, root, cfg["verify_timeout_seconds"])
-            side_effects.update(undo_side_effects(git, before))
+            removed, edited = settle_verify_writes(git, before)
+            verify_removed.update(removed)
+            verify_edits.update(edited)
             if not verify_ok:
                 fail_reason = "verification failed"
 
@@ -559,11 +579,11 @@ def cmd_run(args):
                          + tail(failed_out, 40))
 
     return finish(args, cfg, git, state_dir, task_id, title, branch, base, files,
-                  attempts_log, totals, last, side_effects)
+                  attempts_log, totals, last, verify_removed, verify_edits)
 
 
 def finish(args, cfg, git, state_dir, task_id, title, branch, base, files,
-           attempts_log, totals, last, side_effects=()):
+           attempts_log, totals, last, verify_removed=(), verify_edits=()):
     report = last.get("report") or {}
     passed = last.get("fail_reason") is None
     summary_lines = str(report.get("summary") or "").strip().splitlines()
@@ -584,8 +604,10 @@ def finish(args, cfg, git, state_dir, task_id, title, branch, base, files,
     }
     if not report and last.get("env"):
         out["report_parse_error"] = True
-    if side_effects:
-        out["verify_side_effects"] = sorted(side_effects)
+    if verify_removed:
+        out["verify_removed"] = sorted(verify_removed)
+    if verify_edits:
+        out["verify_edits"] = sorted(verify_edits)
 
     if args.read_only:
         out["status"] = "success" if passed else "needs_human"

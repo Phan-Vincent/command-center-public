@@ -210,35 +210,59 @@ class DelegateTest(unittest.TestCase):
         self.assertEqual((self.repo / "extra.py").read_text(), "x = 1\n")
         self.assertEqual(self.log()[-1]["status"], "needs_human")
 
-    def test_verify_side_effects_outside_scope_are_undone_not_committed(self):
-        # The verify command writes a cache file and touches a tracked file
-        # before asserting, so attempt 1 (bad) leaves them behind too.
-        verify = ("echo cache > cache.json && echo junk >> README.md && " + VERIFY_CALC)
-        code, out = self.delegate(
-            "run", "--title", "add calc", "--task", "implement add()",
-            "--verify", verify, "--files", "./calc.py",
-            plan=[{"write": {"calc.py": CALC_BAD}}, {"write": {"calc.py": CALC_OK}}])
-        out = json.loads(out)
+    def verify_run(self, verify, files=None, plan=None):
+        args = ["run", "--title", "add calc", "--task", "implement add()", "--verify", verify]
+        if files:
+            args += ["--files", files]
+        code, out = self.delegate(*args, plan=plan or [{"write": {"calc.py": CALC_OK}}])
+        return code, json.loads(out)
+
+    def test_verify_by_products_are_removed_not_committed(self):
+        # Written before the assert, so the failed attempt 1 leaves one behind too.
+        code, out = self.verify_run("echo cache > cache.json && " + VERIFY_CALC, "./calc.py",
+                                    plan=[{"write": {"calc.py": CALC_BAD}},
+                                          {"write": {"calc.py": CALC_OK}}])
         self.assertEqual(code, 0, out)
-        self.assertEqual(out["status"], "success")
         self.assertEqual(out["attempts"], ["flash:fail", "flash:pass"])
         self.assertEqual(out["files_changed"], ["calc.py"])
-        self.assertEqual(out["verify_side_effects"], ["README.md", "cache.json"])
-        self.assertNotIn("out_of_scope", out)
+        self.assertEqual(out["verify_removed"], ["cache.json"])
+        self.assertNotIn("verify_edits", out)
         self.assertEqual(self.git("show", "--name-only", "--format=", "HEAD"), "calc.py")
         self.assertEqual(self.git("status", "--porcelain"), "")
-        self.assertEqual((self.repo / "README.md").read_text(), "hi\n")
         self.assertFalse((self.repo / "cache.json").exists())
 
-    def test_verify_side_effects_undone_without_files_too(self):
-        verify = VERIFY_CALC + " && echo cache > cache.json"
-        code, out = self.delegate("run", "--task", "implement add()", "--verify", verify,
-                                  plan=[{"write": {"calc.py": CALC_OK}}])
-        out = json.loads(out)
+    def test_verify_by_products_removed_without_files_too(self):
+        code, out = self.verify_run(VERIFY_CALC + " && echo cache > cache.json")
         self.assertEqual(out["status"], "success")
         self.assertEqual(out["files_changed"], ["calc.py"])
-        self.assertEqual(out["verify_side_effects"], ["cache.json"])
+        self.assertEqual(out["verify_removed"], ["cache.json"])
         self.assertEqual(self.git("status", "--porcelain"), "")
+
+    def test_verify_edit_to_worker_file_is_committed_and_reported(self):
+        # A formatter in verify rewrites a file the worker already changed: the
+        # tests ran on the formatted version, so that is what gets committed.
+        fmt = "python3 -c \"open('calc.py', 'a').write('# formatted\\n')\" && "
+        code, out = self.verify_run(fmt + VERIFY_CALC, "calc.py")
+        self.assertEqual(out["status"], "success")
+        self.assertEqual(out["verify_edits"], ["calc.py"])
+        self.assertEqual(self.git("show", "HEAD:calc.py"), CALC_OK + "# formatted")
+
+    def test_verify_regenerated_tracked_file_is_committed_not_reverted(self):
+        (self.repo / "fixture.txt").write_text("old\n")
+        self.git("add", "fixture.txt")
+        self.git("commit", "-q", "-m", "fixture")
+        regen = "echo new > fixture.txt && grep -q new fixture.txt && " + VERIFY_CALC
+        code, out = self.verify_run(regen, "calc.py,fixture.txt")
+        self.assertEqual(out["status"], "success")
+        self.assertEqual(out["verify_edits"], ["fixture.txt"])
+        self.assertEqual(self.git("show", "HEAD:fixture.txt"), "new")
+        # The same regeneration outside --files goes to review instead.
+        self.git("checkout", "-q", "main")
+        code, out = self.verify_run(regen, "calc.py")
+        self.assertEqual(out["status"], "needs_human")
+        self.assertEqual(out["out_of_scope"], ["fixture.txt"])
+        self.assertEqual(out["verify_edits"], ["fixture.txt"])
+        self.assertEqual(self.git("show", "HEAD:fixture.txt"), "old")
 
     def test_absolute_and_dot_scope_entries(self):
         code, out = self.run_task([{"write": {"calc.py": CALC_OK}}],
