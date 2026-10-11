@@ -191,11 +191,73 @@ class DelegateTest(unittest.TestCase):
         self.assertEqual(self.git("rev-parse", "--abbrev-ref", "HEAD"), "main")
         self.assertEqual(self.recorded_calls()[0]["opts"]["permission-mode"], "read-only")
 
-    def test_pro_no_escalate_and_out_of_scope(self):
+    def test_pro_no_escalate_and_out_of_scope_blocks_commit(self):
+        base = self.git("rev-parse", "HEAD")
         plan = [{"write": {"calc.py": CALC_OK, "extra.py": "x = 1\n"}}]
         code, out = self.run_task(plan, "--model", "pro", "--no-escalate", "--files", "calc.py")
+        self.assertEqual(code, 1)
         self.assertEqual(out["attempts"], ["pro:pass"])
+        self.assertEqual(out["status"], "needs_human")
         self.assertEqual(out["out_of_scope"], ["extra.py"])
+        self.assertIsNone(out["commit"])
+        self.assertIn("outside --files", out["error"])
+        self.assertEqual(self.git("rev-parse", "HEAD"), base)
+        self.assertEqual(self.git("status", "--porcelain"), "")
+        self.assertIn("delegate-out-of-scope:", self.git("stash", "list"))
+        # Nothing is lost: the whole attempt comes back with one pop.
+        self.git("stash", "pop", "-q")
+        self.assertEqual((self.repo / "calc.py").read_text(), CALC_OK)
+        self.assertEqual((self.repo / "extra.py").read_text(), "x = 1\n")
+        self.assertEqual(self.log()[-1]["status"], "needs_human")
+
+    def test_verify_side_effects_outside_scope_are_undone_not_committed(self):
+        # The verify command writes a cache file and touches a tracked file
+        # before asserting, so attempt 1 (bad) leaves them behind too.
+        verify = ("echo cache > cache.json && echo junk >> README.md && " + VERIFY_CALC)
+        code, out = self.delegate(
+            "run", "--title", "add calc", "--task", "implement add()",
+            "--verify", verify, "--files", "./calc.py",
+            plan=[{"write": {"calc.py": CALC_BAD}}, {"write": {"calc.py": CALC_OK}}])
+        out = json.loads(out)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out["status"], "success")
+        self.assertEqual(out["attempts"], ["flash:fail", "flash:pass"])
+        self.assertEqual(out["files_changed"], ["calc.py"])
+        self.assertEqual(out["verify_side_effects"], ["README.md", "cache.json"])
+        self.assertNotIn("out_of_scope", out)
+        self.assertEqual(self.git("show", "--name-only", "--format=", "HEAD"), "calc.py")
+        self.assertEqual(self.git("status", "--porcelain"), "")
+        self.assertEqual((self.repo / "README.md").read_text(), "hi\n")
+        self.assertFalse((self.repo / "cache.json").exists())
+
+    def test_verify_side_effects_undone_without_files_too(self):
+        verify = VERIFY_CALC + " && echo cache > cache.json"
+        code, out = self.delegate("run", "--task", "implement add()", "--verify", verify,
+                                  plan=[{"write": {"calc.py": CALC_OK}}])
+        out = json.loads(out)
+        self.assertEqual(out["status"], "success")
+        self.assertEqual(out["files_changed"], ["calc.py"])
+        self.assertEqual(out["verify_side_effects"], ["cache.json"])
+        self.assertEqual(self.git("status", "--porcelain"), "")
+
+    def test_absolute_and_dot_scope_entries(self):
+        code, out = self.run_task([{"write": {"calc.py": CALC_OK}}],
+                                  "--files", str(self.repo / "calc.py"))
+        self.assertEqual(out["status"], "success")
+        self.git("checkout", "-q", "main")
+        code, out = self.run_task([{"write": {"calc.py": CALC_OK, "x.py": "X = 1\n"}}],
+                                  "--files", ".")
+        self.assertEqual(out["status"], "success")
+        self.assertNotIn("out_of_scope", out)
+
+    def test_directory_scope_entry_covers_its_files(self):
+        code, out = self.delegate(
+            "run", "--title", "add pkg", "--task", "add pkg", "--verify", "true",
+            "--files", "pkg/", plan=[{"write": {"pkg/a.py": "A = 1\n", "pkg/sub/b.py": "B = 2\n"}}])
+        out = json.loads(out)
+        self.assertEqual(out["status"], "success")
+        self.assertEqual(out["files_changed"], ["pkg/a.py", "pkg/sub/b.py"])
+        self.assertNotIn("out_of_scope", out)
 
     def test_task_from_stdin_and_explicit_branch(self):
         code, out = self.delegate("run", "--task-file", "-", "--branch", "feat/x",

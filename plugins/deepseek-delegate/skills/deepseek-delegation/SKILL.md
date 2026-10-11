@@ -84,7 +84,8 @@ and no verify, and the answer comes back in `summary`.
 
 | status | What you do |
 | --- | --- |
-| `success` | The script already ran the verify command and committed. **Do not** re-run it or read the diff. Check `files_changed` and `out_of_scope` for sanity. If `security_sensitive` is true, read the diff with `git show <commit>` and review it properly. If `warning` says no files changed, check that the task really was a no-op. |
+| `success` | The script already ran the verify command and committed. **Do not** re-run it or read the diff. Check `files_changed` for sanity; with `--files`, the commit never touches anything outside them. `verify_side_effects` lists files the verify commands wrote, which were reverted and not committed. If `security_sensitive` is true, read the diff with `git show <commit>` and review it properly. If `warning` says no files changed, check that the task really was a no-op. |
+| `needs_human` with `out_of_scope` | The work passed verify but also changed the files in `out_of_scope`, so nothing was committed. The whole attempt is in `stash` (`delegate-out-of-scope:<task_id>`). Read `git stash show -p --include-untracked stash@{0}`. If the extra edits are needed, `git stash pop` and commit, or re-delegate with a wider `--files`. If they're not, re-delegate with a note to leave those files alone. Ask the user when the call isn't obvious. |
 | `needs_human` | Flash ×2 and Pro ×2 all failed. The partial work is in `stash` (`git stash list`), and `failure_tail` shows the last test output. **Stop and ask the user**: (a) re-scope and re-delegate, (b) let Claude implement it (`git stash pop` first to build on the partial work), or (c) drop it. |
 | `error` | A credential, model-name or config problem. Retrying won't help. Show `error` to the user. |
 | `blocked` | A precondition failed (dirty tree, detached HEAD, prompt too large). Fix it or ask. |
