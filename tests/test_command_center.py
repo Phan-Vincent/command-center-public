@@ -207,14 +207,6 @@ class PokemonHealthTests(unittest.TestCase):
         self.assertEqual(len(found), 1)
         self.assertIn("no recorded successful run", found[0]["message"])
 
-    def test_gate_funnel_separates_candidates_from_abstentions(self):
-        candidates, abstentions, categories = probe._gate_funnel([
-            ("WATCH", 3), ("BUY", 1), ("none", 11), ("suppressed", 2),
-        ])
-        self.assertEqual(candidates, 4)
-        self.assertEqual(abstentions, 13)
-        self.assertEqual(categories["WATCH"], 3)
-
     def test_drift_inventory_excludes_state_and_credentials(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

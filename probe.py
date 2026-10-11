@@ -359,24 +359,15 @@ def _drift_counts(left, right):
     }
 
 
-def _gate_funnel(rows):
-    """Split gate-audit categories into actionable candidates and abstentions."""
-    categories = {str(row[0] or "none"): int(row[1]) for row in rows}
-    actionable = {"BUY", "REVIEW", "MAYBE", "WATCH"}
-    candidates = sum(
-        count for category, count in categories.items()
-        if category.upper() in actionable
-    )
-    return candidates, sum(categories.values()) - candidates, categories
-
-
 def pokemon_scanner_health():
     """Best-effort, read-only scanner health for the hermes dashboard."""
     if HOSTNAME != "peeruser-Dell":
         return None
     home = os.path.expanduser("~")
     runtime = os.path.join(home, ".hermes", "scripts")
-    repo = os.path.join(home, "projects", "pokemon-scanner")
+    # Deploy source for ~/.hermes/scripts (branch fix/scanner-identity-purpose);
+    # the main ~/projects/pokemon-scanner checkout is on a stale branch.
+    repo = os.path.join(home, "projects", "pokemon-scanner-wt", "identity-purpose")
     status_script = os.path.join(runtime, "scanner_status.py")
     python = os.path.join(home, ".hermes", "hermes-agent", "venv", "bin", "python3")
     result = {"available": False, "errors": []}
@@ -443,22 +434,6 @@ def pokemon_scanner_health():
     except Exception as exc:  # noqa: BLE001
         result["errors"].append(f"ops: {exc}")
 
-    gate_path = os.path.join(runtime, "gate_audit.db")
-    try:
-        conn = _read_only_db(gate_path)
-        since = ((result.get("last_run") or {}).get("started_at") or "")
-        rows = conn.execute(
-            "SELECT category, COUNT(*) FROM gate_audit WHERE scanned_at >= ? GROUP BY category",
-            (since,),
-        ).fetchall()
-        candidates, abstentions, categories = _gate_funnel(rows)
-        result["candidate_count"] = candidates
-        result["abstention_count"] = abstentions
-        result["candidate_categories"] = categories
-        conn.close()
-    except Exception as exc:  # noqa: BLE001
-        result["errors"].append(f"gate audit: {exc}")
-
     paper_path = os.path.join(
         home, ".hermes", "data", "pokemon-scanner", "paper-backtest", "paper_trades.db"
     )
@@ -483,15 +458,9 @@ def pokemon_scanner_health():
     }
     try:
         result["drift"] = {
+            "repository": repo,
             "repository_runtime": _drift_counts(
                 _safe_tree(os.path.join(repo, "scripts")), _safe_tree(runtime)
-            ),
-            "repository_skill": _drift_counts(
-                _safe_tree(os.path.join(repo, "skill")),
-                _safe_tree(os.path.join(
-                    home, ".hermes", "skills", "software-development",
-                    "pokemon-card-scanner",
-                )),
             ),
         }
     except Exception as exc:  # noqa: BLE001

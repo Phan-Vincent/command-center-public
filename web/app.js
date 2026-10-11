@@ -466,7 +466,6 @@ function renderPokemon(h, id) {
     `${row.source}:${row.status}×${row.count}`).join(" · ") || "none";
   const drift = p.drift || {};
   const rr = drift.repository_runtime || {};
-  const rs = drift.repository_skill || {};
   const paper = p.paper_experiment || {};
   const services = p.services || {};
   return section(secId(id, "pokemon"), "Pokémon scanner health", "pokemon", `
@@ -474,13 +473,11 @@ function renderPokemon(h, id) {
       <div class="stat-row"><span class="muted">last successful run</span><span class="mono">${esc(p.last_success_at || "none")}</span></div>
       <div class="stat-row"><span class="muted">next timer</span><span class="mono">${esc(p.next_scheduled_run || "unknown")}</span></div>
       <div class="stat-row"><span class="muted">last run</span><span>${chip(run.status || "unknown")} <span class="mono">${esc(run.ended_at || run.started_at || "")}</span></span></div>
-      <div class="stat-row"><span class="muted">candidates / abstentions</span><span><b>${esc(p.candidate_count ?? 0)}</b> / <b>${esc(p.abstention_count ?? 0)}</b></span></div>
       <div class="stat-row"><span class="muted">Discord handler / tunnel</span><span>${chip(services.discord_handler || "unknown")} ${chip(services.tunnel || "unknown")}</span></div>
       <div class="stat-row"><span class="muted">eBay browser</span><span>${chip(p.ebay_auth?.state || "unknown")} ${esc(p.ebay_auth?.basis || "")}</span></div>
       <div class="stat-row"><span class="muted">paper experiment</span><span>${chip(paper.status || "none")} <span class="mono">${esc(paper.experiment_id || "")}</span></span></div>
       <div class="stat-row"><span class="muted">source failures</span><span class="mono ellipsis">${esc(failures)}</span></div>
-      <div class="stat-row"><span class="muted">repo ↔ runtime drift</span><span>${esc(rr.divergent || 0)} divergent · ${esc(rr.repository_only || 0)} repo-only · ${esc(rr.runtime_only || 0)} runtime-only</span></div>
-      <div class="stat-row"><span class="muted">repo ↔ skill drift</span><span>${esc(rs.divergent || 0)} divergent · ${esc(rs.repository_only || 0)} repo-only · ${esc(rs.runtime_only || 0)} runtime-only</span></div>
+      <div class="stat-row"><span class="muted" title="${esc(drift.repository || "")}">repo ↔ runtime drift</span><span>${esc(rr.divergent || 0)} divergent · ${esc(rr.repository_only || 0)} repo-only · ${esc(rr.runtime_only || 0)} runtime-only</span></div>
     </div>
     <div class="tbl-wrap" style="margin-top:8px"><table class="tbl"><thead><tr>
       <th>pricing source</th><th>health</th><th>usable / active</th><th>latest</th>
