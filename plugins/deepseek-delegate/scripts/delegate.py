@@ -18,6 +18,7 @@ Pure Python 3 standard library. See ../README.md.
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -301,7 +302,8 @@ def extract_cost(env, alias, usage, cfg):
 def build_prompt(task, title, files, verify, read_only, feedback, cfg):
     parts = [READ_ONLY_RULES if read_only else WORKER_RULES, f"TASK: {title}", task.strip()]
     if files:
-        parts.append("FILES IN SCOPE (touch others only if unavoidable):\n"
+        parts.append("FILES IN SCOPE (changing any other file blocks the automatic commit; "
+                     "touch others only if unavoidable and say why in open_questions):\n"
                      + "\n".join(f"- {f}" for f in files))
     if verify and not read_only:
         parts.append("VERIFICATION (the reviewer will run exactly these; they must pass):\n"
@@ -331,6 +333,44 @@ def call_reasonix(cfg, root, alias, prompt, read_only):
             "error", f"cannot run reasonix ({cfg['reasonix_bin']}): {e}; npm i -g reasonix")
     return {"rc": rc, "stdout": out, "stderr": err, "timed_out": timed_out,
             "duration_ms": int((time.monotonic() - t0) * 1000), "cmd": cmd}
+
+
+def in_scope(path, files):
+    """True when `path` is a --files entry or sits under one used as a directory."""
+    return any(f == "." or path == f or path.startswith(f + "/") for f in files)
+
+
+def file_digest(root, path):
+    try:
+        return hashlib.sha1((Path(root) / path).read_bytes()).hexdigest()
+    except OSError:  # deleted
+        return None
+
+
+def snapshot(git):
+    """{path: content digest} of every changed path, taken before verify runs."""
+    return {p: file_digest(git.root, p) for p in git.dirty_paths()}
+
+
+def settle_verify_writes(git, before):
+    """Sort out what the verify commands wrote since `snapshot()`.
+
+    New untracked files (caches, build output) are deleted: the run started on
+    a clean tree, so they are pure by-products. Edits to tracked files or to the
+    worker's files (a formatter, regenerated fixtures) are kept, because the
+    tests ran on them; they get the same --files check as the worker's changes.
+    Returns (removed, edited)."""
+    removed, edited = [], []
+    for p in git.dirty_paths():
+        if p in before:
+            if file_digest(git.root, p) != before[p]:
+                edited.append(p)
+        elif git("ls-tree", "--name-only", "HEAD", "--", p, check=False):
+            edited.append(p)
+        else:
+            (Path(git.root) / p).unlink(missing_ok=True)
+            removed.append(p)
+    return removed, edited
 
 
 def run_verify(commands, root, timeout):
@@ -435,6 +475,8 @@ def cmd_run(args):
         raise DelegateError("blocked", "task text is empty")
     title = (args.title or task.strip().splitlines()[0])[:72]
     files = [f.strip() for f in (args.files or "").split(",") if f.strip()]
+    files = [os.path.normpath(os.path.relpath(os.path.realpath(f), os.path.realpath(root))
+                              if os.path.isabs(f) else f).replace(os.sep, "/") for f in files]
     verify = args.verify or list(cfg.get("default_verify") or [])
     task_id = dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4]
 
@@ -467,6 +509,7 @@ def cmd_run(args):
     totals = {}   # currency -> cost
     attempts_log = []
     last = {}
+    verify_removed, verify_edits = set(), set()   # see settle_verify_writes()
 
     for n, alias in enumerate(models, start=1):
         prompt = build_prompt(task, title, files, verify, args.read_only, feedback, cfg)
@@ -491,7 +534,11 @@ def cmd_run(args):
         elif report and str(report.get("status", "")).lower() == "failed":
             fail_reason = "worker reported status=failed"
         if fail_reason is None and not args.read_only:
+            before = snapshot(git)
             verify_ok, verify_results = run_verify(verify, root, cfg["verify_timeout_seconds"])
+            removed, edited = settle_verify_writes(git, before)
+            verify_removed.update(removed)
+            verify_edits.update(edited)
             if not verify_ok:
                 fail_reason = "verification failed"
 
@@ -532,11 +579,11 @@ def cmd_run(args):
                          + tail(failed_out, 40))
 
     return finish(args, cfg, git, state_dir, task_id, title, branch, base, files,
-                  attempts_log, totals, last)
+                  attempts_log, totals, last, verify_removed, verify_edits)
 
 
 def finish(args, cfg, git, state_dir, task_id, title, branch, base, files,
-           attempts_log, totals, last):
+           attempts_log, totals, last, verify_removed=(), verify_edits=()):
     report = last.get("report") or {}
     passed = last.get("fail_reason") is None
     summary_lines = str(report.get("summary") or "").strip().splitlines()
@@ -557,6 +604,10 @@ def finish(args, cfg, git, state_dir, task_id, title, branch, base, files,
     }
     if not report and last.get("env"):
         out["report_parse_error"] = True
+    if verify_removed:
+        out["verify_removed"] = sorted(verify_removed)
+    if verify_edits:
+        out["verify_edits"] = sorted(verify_edits)
 
     if args.read_only:
         out["status"] = "success" if passed else "needs_human"
@@ -567,29 +618,37 @@ def finish(args, cfg, git, state_dir, task_id, title, branch, base, files,
             out["warning"] = "read-only task left changes on disk: " + ", ".join(stray[:8])
     elif passed:
         git("add", "-A")
-        changed = [p for p in git("diff", "--cached", "--name-only", base).splitlines() if p]
+        changed = [p for p in git("diff", "--cached", "--name-only", "--no-renames",
+                                  base).splitlines() if p]
         out["files_changed"] = changed
         out["security_reasons"] = security_scan(git, base, cfg, changed)
         out["security_sensitive"] = bool(out["security_reasons"])
-        if files:
-            scope = set(files)
-            extra = [p for p in changed if p not in scope]
-            if extra:
-                out["out_of_scope"] = extra
-        if git.has_staged():
-            msg = (f"delegate({last['alias']}): {title}\n\n{summary}\n\n"
-                   f"Delegate-Task: {task_id}\n"
-                   f"Delegate-Model: {cfg['models'][last['alias']]}\n"
-                   f"Delegate-Attempts: {', '.join(attempts_log)}\n")
-            git("commit", "-q", "-m", msg)
-        head = git.head()
-        if head != base:
-            out["commit"] = head[:12]
-            stat = git("diff", "--stat", base, head).splitlines()
-            out["diff_stat"] = stat[-1].strip() if stat else ""
+        extra = [p for p in changed if files and not in_scope(p, files)]
+        if extra:
+            # Never commit outside --files: verify ran with these edits present, so an
+            # in-scope-only commit would be unverified. Park the whole attempt instead
+            # (undoing any commits the worker made itself) for Claude to review.
+            git("reset", "-q", base)
+            git("stash", "push", "-u", "-q", "-m", f"delegate-out-of-scope:{task_id} {title}")
+            out.update(status="needs_human", out_of_scope=extra, stash="stash@{0}",
+                       stash_message=f"delegate-out-of-scope:{task_id}",
+                       error="worker changed files outside --files ("
+                             + ", ".join(extra[:8]) + "); nothing was committed")
         else:
-            out["warning"] = "worker reported success but changed no files"
-        out["status"] = "success"
+            if git.has_staged():
+                msg = (f"delegate({last['alias']}): {title}\n\n{summary}\n\n"
+                       f"Delegate-Task: {task_id}\n"
+                       f"Delegate-Model: {cfg['models'][last['alias']]}\n"
+                       f"Delegate-Attempts: {', '.join(attempts_log)}\n")
+                git("commit", "-q", "-m", msg)
+            head = git.head()
+            if head != base:
+                out["commit"] = head[:12]
+                stat = git("diff", "--stat", base, head).splitlines()
+                out["diff_stat"] = stat[-1].strip() if stat else ""
+            else:
+                out["warning"] = "worker reported success but changed no files"
+            out["status"] = "success"
     else:
         out["error"] = last.get("fail_reason")
         vr = last.get("verify_results") or []

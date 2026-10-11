@@ -14,8 +14,11 @@ change with your tests, commits it, logs tokens and cost, and returns
 scripts/delegate.py run   (one Bash call per sub-task)
    1. guardrails: clean tree; auto-branch off main/master → delegate/<slug>-xxxx
    2. reasonix run --model deepseek-flash --permission-mode workspace-write --output-format json  (spec on stdin)
-   3. run YOUR --verify commands (the model's own "tests pass" is not trusted)
+   3. run YOUR --verify commands (the model's own "tests pass" is not trusted);
+      new untracked files they create (caches) are deleted; their edits to tracked
+      files (formatter, regenerated fixtures) are kept and reported as verify_edits
    4. pass → git commit "delegate(flash): <title>"         fail → retry with test output
+      (a pass that changed files outside --files is stashed as needs_human, not committed)
    5. ladder: flash, flash, pro, pro → then stash + "needs_human"
    6. append every call to .delegate/log.jsonl
    7. print {status, files_changed, summary, test_result, open_questions, ...}
@@ -91,7 +94,7 @@ python3 scripts/delegate.py run --read-only --task "Where is the SSH timeout set
 | --- | --- |
 | `--model flash\|pro` | Starting model (default `flash`) |
 | `--verify CMD` | Must exit 0 to count as a pass. Repeatable. Falls back to `default_verify` from config |
-| `--files a,b` | Files in scope. Listed in the prompt; anything else changed is reported as `out_of_scope` |
+| `--files a,b` | Files in scope (an entry also covers everything under it as a directory). Listed in the prompt. If the worker changes anything else, nothing is committed: the attempt is stashed and returned as `needs_human` with `out_of_scope` |
 | `--task TEXT` / `--task-file PATH\|-` | The spec. `-` reads stdin, which suits heredocs |
 | `--read-only` | Search or summarize. Runs Reasonix with `--permission-mode read-only`; no commit |
 | `--no-escalate` | Don't move from Flash to Pro |
@@ -133,7 +136,7 @@ taking precedence over the model's own claims:
 | `status` | Meaning | Exit code |
 | --- | --- | --- |
 | `success` | Verified and committed (read-only: answered) | 0 |
-| `needs_human` | Ladder exhausted. Work is in `stash@{0}` (`delegate-failed:<task_id>`); `failure_tail` has the last test output | 1 |
+| `needs_human` | Ladder exhausted: work is in `stash@{0}` (`delegate-failed:<task_id>`) and `failure_tail` has the last test output. Or verified but changed files outside `--files`: nothing committed, work is in `stash@{0}` (`delegate-out-of-scope:<task_id>`), paths in `out_of_scope` | 1 |
 | `error` | Credential, model-name or config problem. The script doesn't retry | 1 |
 | `blocked` | Precondition failed (dirty tree, detached HEAD, prompt too large) | 2 |
 
@@ -258,5 +261,6 @@ python3 -m unittest discover -s plugins/deepseek-delegate/tests -v
 
 The tests cover the success path, the Flash→Pro escalation, stash on
 exhaustion, fatal credential and unknown-model errors, the dirty-tree block,
-security flagging, fenced-JSON parsing, read-only mode, scope checks, the
+security flagging, fenced-JSON parsing, read-only mode, scope enforcement
+(out-of-scope edits block the commit; verify caches are deleted, verify edits kept), the
 price fallback, and stats.

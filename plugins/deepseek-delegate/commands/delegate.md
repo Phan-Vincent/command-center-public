@@ -1,7 +1,7 @@
 ---
 description: Delegate coding work to DeepSeek via Reasonix (Claude plans and reviews, DeepSeek writes the code)
 argument-hint: <task description> | stats [--since 7d] | doctor
-allowed-tools: Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/delegate.py:*), Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/delegate.py":*), Bash(git status:*), Bash(git log:*), Bash(git diff:*), Bash(git show:*), Bash(git stash list:*)
+allowed-tools: Bash(python3 ${CLAUDE_PLUGIN_ROOT}/scripts/delegate.py:*), Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/delegate.py":*), Bash(git status:*), Bash(git log:*), Bash(git diff:*), Bash(git show:*), Bash(git stash list:*), Bash(git stash show:*)
 ---
 
 Request: $ARGUMENTS
