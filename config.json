@@ -147,6 +147,7 @@
   "alerts": {
     "rules": [
       { "id": "host-down", "type": "host", "state": "unreachable", "severity": "critical" },
+      { "id": "host-offline", "type": "offline", "hosts": ["hermes"], "severity": "critical" },
       { "id": "svc-failed", "type": "service", "state": "failed", "severity": "warning" },
       { "id": "disk-high", "type": "disk", "threshold": 90, "severity": "critical" },
       { "id": "mem-high", "type": "mem", "threshold": 90, "severity": "warning" },

@@ -174,6 +174,43 @@ class AlertNotificationTests(unittest.TestCase):
         alerts.evaluate(status(tunnel="inactive"), cfg, now=T0 + 15)
         self.assertEqual(len(self.sent), 1)
 
+    def offline_status(self, wan=True, dns=True, **hermes):
+        def host(**extra):
+            return {"reachable": True, "wan": {"ok": wan}, "dns": {"ok": dns}, **extra}
+        return {"hosts": {"hermes": host(**hermes), "acer": host()}}
+
+    def offline_config(self, debounce=0):
+        cfg = config(self.state_file, debounce=debounce)
+        cfg["alerts"]["rules"] = [
+            {"id": "host-offline", "type": "offline", "hosts": ["hermes"], "severity": "critical"}]
+        return cfg
+
+    def test_offline_flags_no_internet_then_dns_only_on_listed_hosts(self):
+        cfg = self.offline_config()
+        active = alerts.evaluate(self.offline_status(wan=False), cfg, now=T0)
+        self.assertEqual([a["host"] for a in active], ["hermes"], "acer isn't in the rule's hosts")
+        self.assertIn("hermes has no internet", active[0]["message"])
+        active = alerts.evaluate(self.offline_status(dns=False), cfg, now=T0 + 15)
+        self.assertIn("hermes can't resolve DNS", active[0]["message"])
+        self.assertEqual(alerts.evaluate(self.offline_status(), cfg, now=T0 + 30), [])
+
+    def test_offline_ignores_unreachable_stale_and_old_probe_facts(self):
+        cfg = self.offline_config()
+        for st in (self.offline_status(wan=False, reachable=False),
+                   self.offline_status(wan=False, stale=True),  # last-good facts of a failed collection
+                   {"hosts": {"hermes": {"reachable": True}}}):  # probe predates wan/dns
+            self.assertEqual(alerts.evaluate(st, cfg, now=T0), [])
+
+    def test_offline_notifies_once_per_incident_and_resolves(self):
+        cfg = self.offline_config(debounce=120)
+        self.run_evals(self.offline_status(wan=False), cfg, T0, 10)
+        self.run_evals(self.offline_status(dns=False), cfg, T0 + 150, 10)  # cause changes, same incident
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("CRITICAL", self.sent[0])
+        self.run_evals(self.offline_status(), cfg, T0 + 300, 10)
+        self.assertEqual(len(self.sent), 2)
+        self.assertIn("RESOLVED", self.sent[1])
+
 
 class WebhookDeliveryTests(unittest.TestCase):
     def setUp(self):

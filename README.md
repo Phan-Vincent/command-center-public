@@ -126,6 +126,7 @@ encryption, so no boot-time passphrase is required.
 "alerts": {
   "rules": [
     { "id": "host-down",    "type": "host",    "state": "unreachable", "severity": "critical" },
+    { "id": "host-offline", "type": "offline", "hosts": ["hermes"],    "severity": "critical" },
     { "id": "svc-failed",   "type": "service", "state": "failed",      "severity": "warning" },
     { "id": "disk-high",    "type": "disk",    "threshold": 90,        "severity": "critical" },
     { "id": "mem-high",     "type": "mem",     "threshold": 90,        "severity": "warning" },
@@ -149,9 +150,12 @@ encryption, so no boot-time passphrase is required.
 }
 ```
 
-Alert `type`: `host` (unreachable), `service` (a systemd state like `failed`),
-`disk`/`mem` (percent ≥ threshold), `load` (load1 ≥ threshold, or ≥ cores when
-null). `webhooks` support `discord`, `slack`, and generic (ntfy) bodies.
+Alert `type`: `host` (unreachable), `offline` (answers over Tailscale but its
+probe can't reach the internet or resolve DNS, so its jobs and its own alerts
+fail), `service` (a systemd state like `failed`), `disk`/`mem` (percent ≥
+threshold), `load` (load1 ≥ threshold, or ≥ cores when null). Any rule can take
+`"hosts": [...]` to apply only to those hosts. `webhooks` support `discord`,
+`slack`, and generic (ntfy) bodies.
 
 ### Notifications
 

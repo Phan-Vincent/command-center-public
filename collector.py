@@ -25,7 +25,7 @@ import sys
 import time
 from pathlib import Path
 
-from probe import wan_check
+from probe import dns_check, wan_check
 
 BASE =Path(__file__).resolve().parent
 CONFIG_PATH = BASE / "config.json"
@@ -223,6 +223,7 @@ def collect_local(cfg_host):
         "disk": _disk(),
         "tailscale_ip": _tailscale_ip() or cfg_host.get("tailscale_ip"),
         "wan": wan_check(),
+        "dns": dns_check(),
         "ports": _ports(),
         "processes": _processes([a["match"] for a in cfg_host.get("agents", [])]),
         "projects": [],
