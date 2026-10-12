@@ -58,6 +58,8 @@ def _age_seconds(value):
 def _evaluate_host(host, h, rules):
     alerts = []
     for rule in rules:
+        if rule.get("hosts") is not None and host not in rule["hosts"]:
+            continue
         t = rule.get("type")
         sev = rule.get("severity", "warning")
         first = len(alerts)
@@ -65,6 +67,20 @@ def _evaluate_host(host, h, rules):
             if rule.get("state") == "unreachable" and not h.get("reachable"):
                 alerts.append({"host": host, "rule": rule.get("id", "host-down"),
                                "severity": sev, "message": f"host {host} is unreachable"})
+        elif t == "offline":
+            # Answers over Tailscale but can't reach the internet, so its jobs and
+            # its own alerts fail. Stale facts (host unreachable) are host-down's job.
+            wan, dns = h.get("wan"), h.get("dns")
+            problem = None
+            if h.get("reachable") and not h.get("stale"):
+                if isinstance(wan, dict) and wan.get("ok") is False:
+                    problem = "has no internet"
+                elif isinstance(dns, dict) and dns.get("ok") is False:
+                    problem = "can't resolve DNS"
+            if problem:
+                alerts.append({"host": host, "rule": rule.get("id", "host-offline"),
+                               "severity": sev,
+                               "message": f"{host} {problem} (still reachable over Tailscale)"})
         elif t == "service":
             state = rule.get("state", "failed")
             for u in (h.get("services") or []):

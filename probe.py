@@ -144,6 +144,21 @@ def wan_check(targets=WAN_TARGETS, timeout=3):
             "reached": len(rtts), "tried": len(targets)}
 
 
+# Names the fleet's own jobs depend on. Resolved through the host's normal
+# resolver, so a broken resolver shows up here even while wan_check passes.
+DNS_NAMES = ("discord.com", "api.github.com", "stream.aisstream.io")
+
+
+def dns_check(names=DNS_NAMES, timeout=3):
+    """Can this host resolve names? Up if any name resolves within the timeout."""
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=len(names))
+    futures = [ex.submit(socket.getaddrinfo, name, 443, proto=socket.IPPROTO_TCP) for name in names]
+    done, _ = concurrent.futures.wait(futures, timeout=timeout)
+    ex.shutdown(wait=False)  # getaddrinfo can't be cancelled; don't block on a hung lookup
+    resolved = sum(1 for f in done if f.exception() is None)
+    return {"ok": resolved > 0, "resolved": resolved, "tried": len(names)}
+
+
 def systemd_units():
     units = []
     out = sh("systemctl --user list-units --all --no-legend --type=service,timer 2>/dev/null")
@@ -524,6 +539,7 @@ def main():
         "disk": disk(),
         "tailscale_ip": tailscale_ip(),
         "wan": wan_check(),
+        "dns": dns_check(),
         "services": systemd_units(),
         "docker": docker_containers(),
         "docker_stats": docker_stats(),

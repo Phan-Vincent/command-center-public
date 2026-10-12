@@ -4,6 +4,8 @@
 import socket
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -58,6 +60,31 @@ class WanCheckTests(unittest.TestCase):
         closed.close()
         res = probe.wan_check(targets=(dead,), timeout=1)
         self.assertEqual(res, {"ok": False, "rtt_ms": None, "reached": 0, "tried": 1})
+
+
+class DnsCheckTests(unittest.TestCase):
+    def test_up_when_any_name_resolves(self):
+        def lookup(name, *args, **kwargs):
+            if name == "bad.example":
+                raise socket.gaierror("Temporary failure in name resolution")
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.0.2.1", 443))]
+        with mock.patch.object(socket, "getaddrinfo", side_effect=lookup):
+            res = probe.dns_check(names=("bad.example", "good.example"), timeout=1)
+        self.assertEqual(res, {"ok": True, "resolved": 1, "tried": 2})
+
+    def test_down_when_no_name_resolves(self):
+        with mock.patch.object(socket, "getaddrinfo", side_effect=socket.gaierror("no resolver")):
+            res = probe.dns_check(names=("a.example", "b.example"), timeout=1)
+        self.assertEqual(res, {"ok": False, "resolved": 0, "tried": 2})
+
+    def test_hung_lookup_counts_as_failed_without_blocking(self):
+        release = threading.Event()
+        self.addCleanup(release.set)
+        with mock.patch.object(socket, "getaddrinfo", side_effect=lambda *a, **k: release.wait(5)):
+            start = time.monotonic()
+            res = probe.dns_check(names=("slow.example",), timeout=0.2)
+        self.assertLess(time.monotonic() - start, 2)
+        self.assertEqual(res, {"ok": False, "resolved": 0, "tried": 1})
 
 
 class ClassifyTests(unittest.TestCase):
