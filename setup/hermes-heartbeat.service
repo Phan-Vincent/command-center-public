@@ -1,0 +1,11 @@
+# Pings a dedicated healthchecks.io check so hermes going down or losing its
+# internet alerts from off-site, even when the MacBook dashboard is asleep or
+# on the same broken network. Skipped (not failed) until the ping URL exists.
+# Install: see README "Off-site heartbeat (hermes)".
+[Unit]
+Description=Ping healthchecks.io so it alerts when hermes is down or offline
+ConditionPathExists=%h/.config/hermes-heartbeat/ping-url
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'curl -fsS -m 10 --retry 3 -o /dev/null --data-raw "$$(uptime)" "$$(cat %h/.config/hermes-heartbeat/ping-url)"'

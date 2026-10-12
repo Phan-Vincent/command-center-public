@@ -202,6 +202,26 @@ because nothing can be delivered while the home connection is down. Outages are
 only seen while this MacBook is running. `status.home_internet` carries the
 state and the last 20 outages.
 
+### Off-site heartbeat (hermes)
+
+Everything above runs on this MacBook, so nothing alerts while it's asleep or
+on the home network during an outage. `setup/hermes-heartbeat.{service,timer}`
+covers hermes from outside: every 5 minutes hermes POSTs its `uptime` to its
+own healthchecks.io check, which alerts through the account's integrations when
+pings stop. A ping needs DNS and internet, so a silent check means hermes is
+down or offline. The ping URL lives only on hermes in
+`~/.config/hermes-heartbeat/ping-url` (mode 600); until it exists the service is
+skipped. It matches the dashboard's unit filter, so a failed ping shows up as
+`svc-failed`. (Bezos tracker's healthchecks.io check can't serve as this: it
+pings `/fail` whenever that job is degraded.)
+
+```bash
+scp setup/hermes-heartbeat.service setup/hermes-heartbeat.timer hermes:.config/systemd/user/
+ssh hermes 'systemctl --user daemon-reload && systemctl --user enable --now hermes-heartbeat.timer'
+```
+
+In healthchecks.io the check uses period 5 min and grace 10 min.
+
 ## Files
 
 ```
