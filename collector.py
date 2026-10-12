@@ -25,7 +25,9 @@ import sys
 import time
 from pathlib import Path
 
-BASE = Path(__file__).resolve().parent
+from probe import wan_check
+
+BASE =Path(__file__).resolve().parent
 CONFIG_PATH = BASE / "config.json"
 PROBE_PATH = BASE / "probe.py"
 
@@ -69,6 +71,13 @@ def validate_config(cfg=None):
     for i, r in enumerate((cfg.get("alerts") or {}).get("rules", [])):
         if not r.get("type"):
             problems.append(f"alerts.rules[{i}]: missing 'type'")
+    hi = cfg.get("home_internet") or {}
+    hi_hosts = list(hi.get("hosts", []))
+    if "local_host" in hi:
+        hi_hosts.append(hi["local_host"])
+    for key in hi_hosts:
+        if key not in hosts:
+            problems.append(f"home_internet: unknown host '{key}'")
     for i, wh in enumerate((cfg.get("alerts") or {}).get("webhooks", [])):
         if not (wh.get("url") or wh.get("url_file")):
             problems.append(f"alerts.webhooks[{i}]: needs 'url' or 'url_file'")
@@ -213,6 +222,7 @@ def collect_local(cfg_host):
         "mem": _mem(),
         "disk": _disk(),
         "tailscale_ip": _tailscale_ip() or cfg_host.get("tailscale_ip"),
+        "wan": wan_check(),
         "ports": _ports(),
         "processes": _processes([a["match"] for a in cfg_host.get("agents", [])]),
         "projects": [],

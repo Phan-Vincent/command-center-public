@@ -226,6 +226,11 @@ function deriveIssues(s) {
     }
     add(makeIssue(`alert:${hostId}:${a.severity || ""}:${a.message || ""}`, "alert", hostId, hostLabel, alertTitle(hostId, hostLabel, a.message), sev, "system"));
   });
+  const net = s.home_internet;
+  if (net && (net.state === "down" || net.state === "unreachable")) {
+    const title = net.state === "down" ? "home internet is down" : "home hosts unreachable (home internet likely down)";
+    add(makeIssue("internet", "alert", "acer", "home internet", title, "crit", "system"));
+  }
   for (const [id, h] of Object.entries(s.hosts || {})) {
     hostIssues(id, h).forEach(add);
   }
@@ -272,7 +277,8 @@ function render() {
   const s = state.status;
   if (!s) return;
   $("last-updated").textContent = `updated ${new Date(s.generated_at).toLocaleTimeString()}`;
-  renderSummary(s.summary);
+  renderSummary(s.summary, s.home_internet);
+  if (!$("internet-drawer").hidden) renderInternetDrawer();
   renderAlertBanner(s.alerts || []);
   deriveIssues(s);
   renderHostChips(s);
@@ -286,14 +292,73 @@ function render() {
   updateRefreshUI();
 }
 
-function renderSummary(sum) {
+function renderSummary(sum, net) {
   if (!sum) return;
   const health = sum.health || "ok";
   $("summary").innerHTML = `
     <div class="stat-pill pill-health ${esc(health)}"><span aria-hidden="true">●</span><b>${esc(health.toUpperCase())}</b></div>
     <div class="stat-pill"><b>${esc(sum.hosts_up)}/${esc(sum.hosts_total)}</b><span class="cap">hosts up</span></div>
     <div class="stat-pill"><b>${esc(sum.failed_services)}</b><span class="cap">failed svc</span></div>
-    <div class="stat-pill"><b>${esc(sum.alerts_total)}</b><span class="cap">alerts</span></div>`;
+    <div class="stat-pill"><b>${esc(sum.alerts_total)}</b><span class="cap">alerts</span></div>
+    ${renderInternetPill(net)}`;
+}
+
+/* --- home internet ----------------------------------------------------------- */
+const NET_LABEL = { up: "up", down: "DOWN", unreachable: "unreachable", unknown: "unknown" };
+
+function fmtDur(secs) {
+  secs = Math.max(0, Math.round(secs || 0));
+  if (secs < 60) return `${secs}s`;
+  if (secs < 3600) return `${Math.floor(secs / 60)}m`;
+  if (secs < 86400) return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`;
+  return `${Math.floor(secs / 86400)}d ${Math.floor((secs % 86400) / 3600)}h`;
+}
+function fmtClock(epoch) {
+  return new Date(epoch * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function renderInternetPill(net) {
+  if (!net || !net.state) return "";
+  const now = Date.now() / 1000;
+  let detail;
+  if (net.open) detail = `for ${fmtDur(now - net.open.start)}`;
+  else if (net.state === "up") {
+    const last = (net.outages || [])[0];
+    detail = last ? `last drop ${fmtDur(now - last.end)} ago` : (net.rtt_ms != null ? `${net.rtt_ms}ms` : "");
+  } else detail = "";
+  return `<button type="button" class="stat-pill pill-net ${esc(net.state)}" id="btn-internet"
+      aria-label="Home internet ${esc(NET_LABEL[net.state] || net.state)}; show outage history">
+    <span aria-hidden="true">●</span><b>${esc(NET_LABEL[net.state] || net.state)}</b>
+    <span class="cap">home internet${detail ? ` · ${esc(detail)}` : ""}</span></button>`;
+}
+
+function renderInternetDrawer() {
+  const net = state.status?.home_internet;
+  if (!net) { $("internet-body").innerHTML = `<div class="empty">no data yet</div>`; return; }
+  const explain = {
+    up: "A home host (hermes or acer) can reach the internet.",
+    down: "hermes and acer both report no internet: the home connection is down.",
+    unreachable: "No home host answers but this MacBook is online: home internet (or Tailscale to home) is down.",
+    unknown: "Not enough data to tell (this MacBook may be offline too).",
+  };
+  const outages = net.outages || [];
+  const rows = outages.map((o) => `<tr>
+      <td class="mono" data-v="${esc(o.start)}">${esc(fmtClock(o.start))}</td>
+      <td data-v="${esc(o.seconds)}">${esc(fmtDur(o.seconds))}</td>
+      <td>${o.confirmed ? `<span class="chip failed">down</span>` : `<span class="chip" title="home hosts were unreachable from the MacBook">unreachable</span>`}</td>
+    </tr>`).join("");
+  $("internet-body").innerHTML = `
+    <p class="net-explain"><b>${esc(NET_LABEL[net.state] || net.state)}</b> since ${esc(fmtClock(net.since))}. ${esc(explain[net.state] || "")}</p>
+    <div class="stat-grid">
+      <div class="stat-row"><span class="muted">drops, last 24h</span><span>${esc(net.count_24h)}</span></div>
+      <div class="stat-row"><span class="muted">drops, last 7d</span><span>${esc(net.count_7d)}</span></div>
+      <div class="stat-row"><span class="muted">downtime, last 7d</span><span>${esc(fmtDur(net.downtime_7d_seconds))}</span></div>
+      ${net.open ? `<div class="stat-row"><span class="muted">current outage</span><span>since ${esc(fmtClock(net.open.start))}</span></div>` : ""}
+    </div>
+    ${outages.length
+      ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>started</th><th>lasted</th><th>seen as</th></tr></thead><tbody>${rows}</tbody></table></div>`
+      : `<div class="empty">no outages recorded yet</div>`}
+    <p class="muted net-note">Checked every refresh (~15s) from hermes + acer. Outages are only seen while this MacBook is running.</p>`;
 }
 
 function renderAlertBanner(alerts) {
@@ -804,7 +869,7 @@ function openDrawer(id, trigger) {
   $(id).hidden = false;
 }
 function closeDrawers() {
-  ["audit-drawer", "alerts-drawer", "logs-drawer"].forEach((id) => ($(id).hidden = true));
+  ["audit-drawer", "alerts-drawer", "logs-drawer", "internet-drawer"].forEach((id) => ($(id).hidden = true));
   const saved = state.lastFocus;
   state.lastFocus = null;
   if (saved && saved.node && typeof saved.node.focus === "function" && document.contains(saved.node)) {
@@ -1117,6 +1182,9 @@ document.addEventListener("click", (ev) => {
   const drawerClose = ev.target.closest(".drawer-close");
   if (drawerClose) return closeDrawers();
 
+  const netPill = ev.target.closest("#btn-internet");
+  if (netPill) { renderInternetDrawer(); return openDrawer("internet-drawer", netPill); }
+
   const alertBanner = ev.target.closest("#alert-banner");
   if (alertBanner) { renderAlertsDrawer(); openDrawer("alerts-drawer", alertBanner); }
 });
@@ -1124,7 +1192,7 @@ document.addEventListener("click", (ev) => {
 document.addEventListener("keydown", (ev) => {
   if (ev.key === "Escape") {
     if (!$("action-drawer").hidden) return closeActionDrawer();
-    if (!$("audit-drawer").hidden || !$("alerts-drawer").hidden || !$("logs-drawer").hidden) closeDrawers();
+    if (["audit-drawer", "alerts-drawer", "logs-drawer", "internet-drawer"].some((id) => !$(id).hidden)) closeDrawers();
     return;
   }
   trapActionDrawerFocus(ev);

@@ -37,7 +37,7 @@ Per host column (MacBook / hermes / acer):
 
 | Section | Contents |
 |---|---|
-| Fleet strip (top) | health pill, hosts up, failed services, alert count, refresh countdown |
+| Fleet strip (top) | health pill, hosts up, failed services, alert count, **home internet** pill (click for outage history), refresh countdown |
 | Issues | deduplicated alerts + unreachable/stale hosts, collection errors, failed services, unhealthy containers |
 | System | uptime, load, CPU, memory + disk bars, **sparklines** for load/mem/disk history |
 | systemd user units | active/failed chips, sortable, per-unit **log** button |
@@ -184,6 +184,20 @@ python3 healthcheck.py --test   # sends a test message to every webhook
 The dashboard runs only while you're logged in (it's a LaunchAgent), so it
 starts after a reboot at login, not before.
 
+### Home internet
+
+Every collection, hermes and acer (both on the home LAN) and this MacBook
+TCP-connect to 1.1.1.1, 8.8.8.8 and 208.67.222.222 on :443 (`probe.wan_check`).
+`home_internet.py` turns that into `up`, `down` (both home hosts report no
+internet), `unreachable` (no home host answers but the MacBook is online, as
+when you're away), or `unknown`. Runs of down/unreachable are logged as outages
+in `data/home_internet.json`. Unconfirmed blips under `min_unconfirmed_seconds`
+are dropped. When an outage of at least `notify_min_minutes` ends, one summary
+goes to webhooks matching rule `home-internet`. It's sent after the outage
+because nothing can be delivered while the home connection is down. Outages are
+only seen while this MacBook is running. `status.home_internet` carries the
+state and the last 20 outages.
+
 ## Files
 
 ```
@@ -193,6 +207,7 @@ collector.py     local macOS facts + ssh orchestration → JSON
 metrics.py       sqlite time-series store (data/metrics.db)
 alerts.py        rule engine + notification lifecycle (dedupe, resolve, persistence)
 notify.py        webhook delivery shared by alerts.py and healthcheck.py
+home_internet.py home WAN state + outage log (data/home_internet.json)
 healthcheck.py   independent launchd job: notifies when the dashboard is down
 control.py       allowlisted action/exec execution + redacted audit log
 server.py        stdlib HTTP server + JSON API

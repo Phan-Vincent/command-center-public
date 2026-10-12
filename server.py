@@ -31,6 +31,7 @@ from pathlib import Path
 import alerts
 import collector
 import control
+import home_internet
 import metrics
 
 BASE = Path(__file__).resolve().parent
@@ -107,6 +108,10 @@ def refresh_status(force=False, cfg=None):
 
     if fresh is not None:
         # Annotate (fast, outside the swap) then persist metrics + alerts.
+        try:
+            fresh["home_internet"] = home_internet.update(fresh, cfg)
+        except Exception as e:  # noqa: BLE001
+            print(f"[home_internet] {e}", flush=True)
         active = alerts.evaluate(fresh, cfg)
         fresh["summary"] = _summarize(fresh, active)
         fresh["alerts"] = active

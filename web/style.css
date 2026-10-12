@@ -71,6 +71,16 @@ body.compact .section-content { padding-top: 2px; }
 .pill-health { border-color: var(--green); color: var(--green); }
 .pill-health.degraded { border-color: var(--amber); color: var(--amber); }
 .pill-health.down, .pill-health.critical { border-color: var(--red); color: var(--red); }
+.pill-net { color: var(--text); font: inherit; font-size: 12px; cursor: pointer; }
+.pill-net:hover { border-color: var(--muted); }
+.pill-net > span[aria-hidden] { color: var(--muted); }
+.pill-net.up > span[aria-hidden] { color: var(--green); }
+.pill-net.unreachable { border-color: var(--amber); }
+.pill-net.unreachable > span[aria-hidden] { color: var(--amber); }
+.pill-net.down { border-color: var(--red); color: var(--red); }
+.pill-net.down > span[aria-hidden] { color: var(--red); }
+.net-explain { margin: 0 0 10px; }
+.net-note { margin: 10px 0 0; font-size: 11px; }
 
 .toggle { display: flex; align-items: center; gap: 5px; color: var(--muted); cursor: pointer; font-size: 12px; white-space: nowrap; }
 .btn {

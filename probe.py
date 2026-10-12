@@ -7,19 +7,22 @@ Self-contained (stdlib only), emits ONE JSON object on stdout. All diagnostics
 go to stderr so stdout stays parseable. Nothing is written on the remote host
 (other than transient /tmp files it cleans up).
 
-Auto-discovers: host facts, load/mem/disk, tailscale IP, systemd user units
+Auto-discovers: host facts, load/mem/disk, tailscale IP, internet reachability, systemd user units
 (services+timers filtered to fleet-relevant names), docker containers,
 listening ports, key agent processes, hermes cron jobs, system crontab,
 git projects, and a few known extra paths per host.
 """
 
+import concurrent.futures
 import hashlib
 import json
 import os
 import re
+import socket
 import sqlite3
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 
 HOSTNAME = subprocess.run(["hostname", "-s"], capture_output=True, text=True).stdout.strip() or "unknown"
@@ -118,6 +121,27 @@ def tailscale_ip():
     out = sh("ip -4 -o addr show tailscale0 2>/dev/null | awk '{print $4}'")
     m = re.search(r"([\d.]+)/", out)
     return m.group(1) if m else None
+
+
+# Public anycast resolvers on :443 from three providers. Raw IPs, so a DNS fault
+# isn't read as an outage. (Quad9 :443 is unreachable from the home network.)
+WAN_TARGETS = (("1.1.1.1", 443), ("8.8.8.8", 443), ("208.67.222.222", 443))
+
+
+def wan_check(targets=WAN_TARGETS, timeout=3):
+    """Can this host reach the internet? Up if any target accepts a TCP connect."""
+    def attempt(target):
+        start = time.monotonic()
+        try:
+            with socket.create_connection(target, timeout=timeout):
+                return round((time.monotonic() - start) * 1000)
+        except OSError:
+            return None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(targets)) as ex:
+        rtts = [r for r in ex.map(attempt, targets) if r is not None]
+    return {"ok": bool(rtts), "rtt_ms": min(rtts) if rtts else None,
+            "reached": len(rtts), "tried": len(targets)}
 
 
 def systemd_units():
@@ -499,6 +523,7 @@ def main():
         "mem": meminfo(),
         "disk": disk(),
         "tailscale_ip": tailscale_ip(),
+        "wan": wan_check(),
         "services": systemd_units(),
         "docker": docker_containers(),
         "docker_stats": docker_stats(),

@@ -159,8 +159,17 @@
     "notify": { "min_active_seconds": 120, "state_file": "data/alert_state.json" },
     "webhooks": [
       { "id": "discord", "type": "discord", "url_file": "~/.config/command-center/discord-webhook",
-        "severities": ["critical"], "rules": ["pokemon-quiet"] }
+        "severities": ["critical"], "rules": ["pokemon-quiet", "home-internet"] }
     ]
+  },
+  "home_internet": {
+    "_comment": "Home WAN check: hermes + acer probe the internet; outages are logged and a summary is sent (rule home-internet) after outages >= notify_min_minutes end.",
+    "hosts": ["hermes", "acer"],
+    "local_host": "macbook",
+    "state_file": "data/home_internet.json",
+    "keep_outages": 200,
+    "min_unconfirmed_seconds": 60,
+    "notify_min_minutes": 10
   },
   "healthcheck": { "interval_seconds": 120, "fail_threshold": 2, "stale_after_seconds": 300, "timeout_seconds": 10 }
 }
