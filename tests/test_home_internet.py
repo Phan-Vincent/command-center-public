@@ -207,6 +207,31 @@ class OutageLogTests(unittest.TestCase):
         view = self.feed(UP, T0 + 700, 1)
         self.assertTrue(view["outages"][0]["confirmed"])
 
+    def test_mac_dark_wakes_do_not_log_outages(self):
+        # Asleep at home: a brief background wake every few minutes runs one
+        # collection before Tailscale reconnects, so the home hosts look unreachable.
+        self.feed(UP, T0, 2)
+        for i in range(10):
+            self.feed(AWAY_UNREACHABLE, T0 + 300 + i * 240, 1)
+        view = self.feed(UP, T0 + 300 + 10 * 240, 3)    # full wake
+        self.assertEqual(view["outages"], [])
+        self.assertEqual(self.sent, [])
+
+    def test_unconfirmed_outage_open_across_sleep_is_discarded(self):
+        self.feed(UP, T0, 1)
+        self.feed(AWAY_UNREACHABLE, T0 + 15, 10)        # seen while awake...
+        self.feed(UP, T0 + 15 + 9 * 15 + 3600, 1)       # ...then an hour asleep
+        view = self.feed(UP, T0 + 15 + 9 * 15 + 3615, 1)
+        self.assertEqual(view["outages"], [])
+        self.assertEqual(self.sent, [])
+
+    def test_confirmed_outage_survives_sleep(self):
+        self.feed(UP, T0, 1)
+        self.feed(DOWN, T0 + 15, 4)                     # the home hosts said so
+        view = self.feed(UP, T0 + 15 + 3 * 15 + 3600, 1)
+        self.assertEqual(len(view["outages"]), 1)
+        self.assertTrue(view["outages"][0]["confirmed"])
+
     def test_state_survives_restart_and_log_is_capped(self):
         self.cfg["home_internet"]["keep_outages"] = 3
         t = T0

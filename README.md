@@ -196,7 +196,9 @@ TCP-connect to 1.1.1.1, 8.8.8.8 and 208.67.222.222 on :443 (`probe.wan_check`).
 internet), `unreachable` (no home host answers but the MacBook is online, as
 when you're away), or `unknown`. Runs of down/unreachable are logged as outages
 in `data/home_internet.json`. Unconfirmed blips under `min_unconfirmed_seconds`
-are dropped. When an outage of at least `notify_min_minutes` ends, one summary
+are dropped. So are unconfirmed outages that span a gap of more than
+`max_sample_gap_seconds` between collections: that gap means the MacBook slept,
+and its brief background wakes collect before Tailscale reconnects. When an outage of at least `notify_min_minutes` ends, one summary
 goes to webhooks matching rule `home-internet`. It's sent after the outage
 because nothing can be delivered while the home connection is down. Outages are
 only seen while this MacBook is running. `status.home_internet` carries the

@@ -13,6 +13,13 @@ can reach the internet (probe.wan_check). Every collection is classified as:
 Runs of down/unreachable become outages, logged to `state_file` so they survive
 restarts. `unknown` neither opens nor closes an outage. Unconfirmed outages
 shorter than `min_unconfirmed_seconds` are dropped as Tailscale/ssh blips.
+
+A gap of more than `max_sample_gap_seconds` since the previous collection means
+the MacBook was asleep. Its brief background wakes run a collection before
+Tailscale reconnects, which looks exactly like `unreachable`. So the first
+sample after a gap can't open an unconfirmed outage, and an unconfirmed outage
+still open across a gap is discarded: nobody was watching. Confirmed outages
+come from the home hosts themselves and are kept.
 Once an outage of at least `notify_min_minutes` ends — when the home internet
 is back and the message can actually get out — one summary goes to every
 webhook matching rule `home-internet`.
@@ -36,6 +43,7 @@ DEFAULTS = {
     "state_file": "data/home_internet.json",
     "keep_outages": 200,
     "min_unconfirmed_seconds": 60,
+    "max_sample_gap_seconds": 120,
     "notify_min_minutes": 10,
 }
 
@@ -162,6 +170,13 @@ def update(status, cfg, now=None):
     with _LOCK:
         path = _state_path(settings)
         data = _load(path)
+        last = data.get("last_sample")
+        data["last_sample"] = now
+        if last is not None and now - last > settings["max_sample_gap_seconds"]:
+            if state == "unreachable":
+                state = "unknown"  # just woke: Tailscale may not have reconnected yet
+            if data["open"] is not None and not data["open"]["confirmed"]:
+                data["open"] = None
         if state != data["state"]:
             data["state"], data["since"] = state, now
         if state in ("down", "unreachable"):
