@@ -159,6 +159,38 @@ def dns_check(names=DNS_NAMES, timeout=3):
     return {"ok": resolved > 0, "resolved": resolved, "tried": len(names)}
 
 
+MODEM_IP = "192.168.100.1"  # cable modems answer here even when their line is down
+
+
+def default_gateway():
+    m = re.search(r"default via ([\d.]+)", sh("ip -4 route show default 2>/dev/null"))
+    return m.group(1) if m else None
+
+
+def ping(ip, timeout=1):
+    """One ICMP echo; rtt in ms, or None if no reply."""
+    try:
+        r = subprocess.run(["ping", "-n", "-c", "1", "-W", str(timeout), ip],
+                           capture_output=True, text=True, timeout=timeout + 2)
+    except Exception:  # noqa: BLE001
+        return None
+    m = re.search(r"time=([\d.]+)", r.stdout)
+    return round(float(m.group(1)), 1) if r.returncode == 0 and m else None
+
+
+def path_check():
+    """Which hop on the way out answers: the home router, then the cable modem.
+
+    During an outage this tells a hung router (no reply) from a dead modem
+    link (router replies, modem doesn't) from a Spectrum-side fault (both reply).
+    """
+    hops = {"router": default_gateway(), "modem": MODEM_IP}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(hops)) as ex:
+        rtts = dict(zip(hops, ex.map(lambda ip: ping(ip) if ip else None, hops.values())))
+    return {name: {"ip": ip, "ok": rtts[name] is not None, "rtt_ms": rtts[name]}
+            for name, ip in hops.items()}
+
+
 def systemd_units():
     units = []
     out = sh("systemctl --user list-units --all --no-legend --type=service,timer 2>/dev/null")
@@ -539,6 +571,7 @@ def main():
         "disk": disk(),
         "tailscale_ip": tailscale_ip(),
         "wan": wan_check(),
+        "path": path_check(),
         "dns": dns_check(),
         "services": systemd_units(),
         "docker": docker_containers(),

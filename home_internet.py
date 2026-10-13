@@ -20,6 +20,12 @@ Tailscale reconnects, which looks exactly like `unreachable`. So the first
 sample after a gap can't open an unconfirmed outage, and an unconfirmed outage
 still open across a gap is discarded: nobody was watching. Confirmed outages
 come from the home hosts themselves and are kept.
+
+The home hosts also ping the router and the cable modem (probe.path_check).
+Each confirmed outage records which hop failed (`where`): `router` (no reply
+from the router), `modem` (router replies, modem doesn't) or `upstream` (both
+reply, so the fault is past the modem).
+
 Once an outage of at least `notify_min_minutes` ends — when the home internet
 is back and the message can actually get out — one summary goes to every
 webhook matching rule `home-internet`.
@@ -104,6 +110,31 @@ def classify(status, settings):
     return ("unreachable" if local.get("ok") else "unknown"), None
 
 
+WHERE_TEXT = {
+    "router": "the router stopped answering: router hung",
+    "modem": "the router answered but the modem didn't: router WAN port, cable or modem",
+    "upstream": "router and modem both answered: the modem's line or Spectrum",
+}
+
+
+def where(status, settings):
+    """Which hop failed, from the home hosts' router/modem pings (None without data).
+
+    A hop counts as up if any home host reached it, so hermes losing Wi-Fi
+    doesn't blame the router while wired acer still reaches it.
+    """
+    hosts = status.get("hosts", {})
+    paths = [h["path"] for h in (hosts.get(k) or {} for k in settings["hosts"])
+             if h.get("reachable") and not h.get("stale") and isinstance(h.get("path"), dict)]
+    if not paths:
+        return None
+    if not any((p.get("router") or {}).get("ok") for p in paths):
+        return "router"
+    if not any((p.get("modem") or {}).get("ok") for p in paths):
+        return "modem"
+    return "upstream"
+
+
 def _clock(epoch):
     return time.strftime("%b %d %H:%M", time.localtime(epoch))
 
@@ -111,7 +142,8 @@ def _clock(epoch):
 def outage_text(o):
     span = f"{_clock(o['start'])}–{time.strftime('%H:%M', time.localtime(o['end']))}"
     how = "" if o["confirmed"] else " (home hosts unreachable from the MacBook; not confirmed from inside)"
-    return f"🌐 Home internet was down for {notify.duration(o['seconds'])} ({span}){how}"
+    cause = f" — {WHERE_TEXT[o['where']]}" if o.get("where") in WHERE_TEXT else ""
+    return f"🌐 Home internet was down for {notify.duration(o['seconds'])} ({span}){how}{cause}"
 
 
 def _close(data, settings, now):
@@ -122,6 +154,10 @@ def _close(data, settings, now):
         return
     outage = {"start": o["start"], "end": now, "seconds": round(seconds),
               "confirmed": o["confirmed"]}
+    tally = o.get("where") or {}
+    if tally:
+        outage["where"] = max(tally, key=tally.get)  # the verdict most samples agreed on
+        outage["where_samples"] = tally
     data["outages"] = (data["outages"] + [outage])[-int(settings["keep_outages"]):]
     if seconds >= float(settings["notify_min_minutes"]) * 60:
         data["pending"].append(outage)
@@ -142,13 +178,14 @@ def _deliver(data, cfg, now):
         data["retry_after"] = now + RETRY_BACKOFF_SECONDS
 
 
-def _view(data, rtt, now):
+def _view(data, rtt, hop, now):
     outages = data["outages"]
     recent = [o for o in outages if now - o["end"] <= 7 * 86400]
     return {
         "state": data["state"],
         "since": data["since"],
         "rtt_ms": rtt,
+        "where": hop,
         "open": data["open"],
         "outages": list(reversed(outages[-20:])),  # newest first
         "count_24h": sum(1 for o in recent if now - o["end"] <= 86400),
@@ -167,6 +204,7 @@ def update(status, cfg, now=None):
     settings = _settings(cfg)
     now = time.time() if now is None else now
     state, rtt = classify(status, settings)
+    hop = where(status, settings)
     with _LOCK:
         path = _state_path(settings)
         data = _load(path)
@@ -183,8 +221,11 @@ def update(status, cfg, now=None):
             if data["open"] is None:
                 data["open"] = {"start": now, "confirmed": False}
             data["open"]["confirmed"] = data["open"]["confirmed"] or state == "down"
+            if state == "down" and hop:
+                tally = data["open"].setdefault("where", {})
+                tally[hop] = tally.get(hop, 0) + 1
         elif state == "up" and data["open"] is not None:
             _close(data, settings, now)
         _deliver(data, cfg, now)
         _save(path, data)
-        return _view(data, rtt, now)
+        return _view(data, rtt, hop, now)

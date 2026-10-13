@@ -341,11 +341,18 @@ function renderInternetDrawer() {
     unreachable: "No home host answers but this MacBook is online: home internet (or Tailscale to home) is down.",
     unknown: "Not enough data to tell (this MacBook may be offline too).",
   };
+  const where = {
+    router: ["router", "the router stopped answering: router hung"],
+    modem: ["modem link", "the router answered but the modem didn't: router WAN port, cable or modem"],
+    upstream: ["past the modem", "router and modem both answered: the modem's line or Spectrum"],
+  };
+  const whereChip = (w) => where[w] ? `<span class="chip" title="${esc(where[w][1])}">${esc(where[w][0])}</span>` : `<span class="muted">—</span>`;
   const outages = net.outages || [];
   const rows = outages.map((o) => `<tr>
       <td class="mono" data-v="${esc(o.start)}">${esc(fmtClock(o.start))}</td>
       <td data-v="${esc(o.seconds)}">${esc(fmtDur(o.seconds))}</td>
       <td>${o.confirmed ? `<span class="chip failed">down</span>` : `<span class="chip" title="home hosts were unreachable from the MacBook">unreachable</span>`}</td>
+      <td>${whereChip(o.where)}</td>
     </tr>`).join("");
   $("internet-body").innerHTML = `
     <p class="net-explain"><b>${esc(NET_LABEL[net.state] || net.state)}</b> since ${esc(fmtClock(net.since))}. ${esc(explain[net.state] || "")}</p>
@@ -354,11 +361,12 @@ function renderInternetDrawer() {
       <div class="stat-row"><span class="muted">drops, last 7d</span><span>${esc(net.count_7d)}</span></div>
       <div class="stat-row"><span class="muted">downtime, last 7d</span><span>${esc(fmtDur(net.downtime_7d_seconds))}</span></div>
       ${net.open ? `<div class="stat-row"><span class="muted">current outage</span><span>since ${esc(fmtClock(net.open.start))}</span></div>` : ""}
+      ${net.open && where[net.where] ? `<div class="stat-row"><span class="muted">failing hop now</span><span>${esc(where[net.where][1])}</span></div>` : ""}
     </div>
     ${outages.length
-      ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>started</th><th>lasted</th><th>seen as</th></tr></thead><tbody>${rows}</tbody></table></div>`
+      ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>started</th><th>lasted</th><th>seen as</th><th>where</th></tr></thead><tbody>${rows}</tbody></table></div>`
       : `<div class="empty">no outages recorded yet</div>`}
-    <p class="muted net-note">Checked every refresh (~15s) from hermes + acer. Outages are only seen while this MacBook is running.</p>`;
+    <p class="muted net-note">Checked every refresh (~15s) from hermes + acer, which also ping the router and the modem to show where an outage starts. Outages are only seen while this MacBook is running.</p>`;
 }
 
 function renderAlertBanner(alerts) {

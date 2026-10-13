@@ -198,11 +198,20 @@ when you're away), or `unknown`. Runs of down/unreachable are logged as outages
 in `data/home_internet.json`. Unconfirmed blips under `min_unconfirmed_seconds`
 are dropped. So are unconfirmed outages that span a gap of more than
 `max_sample_gap_seconds` between collections: that gap means the MacBook slept,
-and its brief background wakes collect before Tailscale reconnects. When an outage of at least `notify_min_minutes` ends, one summary
-goes to webhooks matching rule `home-internet`. It's sent after the outage
-because nothing can be delivered while the home connection is down. Outages are
-only seen while this MacBook is running. `status.home_internet` carries the
-state and the last 20 outages.
+and its brief background wakes collect before Tailscale reconnects.
+
+The home hosts also ping the router (their default gateway) and the cable modem
+at 192.168.100.1 (`probe.path_check`). Each confirmed outage records which hop
+failed, the verdict most samples agreed on: `router` (no reply from the router,
+so it hung), `modem` (router replies, modem doesn't: the router's WAN port, the
+cable or the modem) or `upstream` (both reply: the modem's line or Spectrum).
+
+When an outage of at least `notify_min_minutes` ends, one summary goes to
+webhooks matching rule `home-internet`, naming the failing hop when known. It's
+sent after the outage because nothing can be delivered while the home
+connection is down. Outages are only seen while this MacBook is running.
+`status.home_internet` carries the state, the failing hop now, and the last 20
+outages.
 
 ### Off-site heartbeat (hermes)
 

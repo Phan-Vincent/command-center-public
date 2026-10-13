@@ -87,6 +87,48 @@ class DnsCheckTests(unittest.TestCase):
         self.assertEqual(res, {"ok": False, "resolved": 0, "tried": 1})
 
 
+class PathCheckTests(unittest.TestCase):
+    def test_ping_parses_reply_and_treats_failure_as_none(self):
+        ok = mock.Mock(returncode=0, stdout="64 bytes from 192.168.1.1: icmp_seq=1 ttl=64 time=2.47 ms\n")
+        lost = mock.Mock(returncode=1, stdout="1 packets transmitted, 0 received, 100% packet loss\n")
+        with mock.patch.object(probe.subprocess, "run", return_value=ok):
+            self.assertEqual(probe.ping("192.168.1.1"), 2.5)
+        with mock.patch.object(probe.subprocess, "run", return_value=lost):
+            self.assertIsNone(probe.ping("192.168.1.1"))
+
+    def test_path_check_reports_both_hops(self):
+        replies = {"192.168.1.1": 2.5, "192.168.100.1": None}
+        with mock.patch.object(probe, "default_gateway", return_value="192.168.1.1"), \
+                mock.patch.object(probe, "ping", side_effect=lambda ip: replies[ip]):
+            res = probe.path_check()
+        self.assertEqual(res["router"], {"ip": "192.168.1.1", "ok": True, "rtt_ms": 2.5})
+        self.assertEqual(res["modem"], {"ip": "192.168.100.1", "ok": False, "rtt_ms": None})
+
+
+def with_path(snapshot, router, modem, hosts=("hermes", "acer")):
+    for k in hosts:
+        snapshot["hosts"][k]["path"] = {"router": {"ok": router}, "modem": {"ok": modem}}
+    return snapshot
+
+
+class WhereTests(unittest.TestCase):
+    settings = {"hosts": ["hermes", "acer"], "local_host": "macbook"}
+
+    def where(self, s):
+        return home_internet.where(s, self.settings)
+
+    def test_verdicts(self):
+        self.assertEqual(self.where(with_path(snap(host(False), host(False)), False, False)), "router")
+        self.assertEqual(self.where(with_path(snap(host(False), host(False)), True, False)), "modem")
+        self.assertEqual(self.where(with_path(snap(host(False), host(False)), True, True)), "upstream")
+        self.assertIsNone(self.where(snap(host(False), host(False))))  # probe without path facts
+
+    def test_any_host_reaching_the_router_clears_it(self):
+        s = with_path(snap(host(False), host(False)), False, False, hosts=("hermes",))  # hermes lost Wi-Fi
+        s = with_path(s, True, True, hosts=("acer",))                                 # wired acer is fine
+        self.assertEqual(self.where(s), "upstream")
+
+
 class ClassifyTests(unittest.TestCase):
     settings = {"hosts": ["hermes", "acer"], "local_host": "macbook"}
 
@@ -206,6 +248,16 @@ class OutageLogTests(unittest.TestCase):
         self.feed(AWAY_UNREACHABLE, T0 + 75, 40)
         view = self.feed(UP, T0 + 700, 1)
         self.assertTrue(view["outages"][0]["confirmed"])
+
+    def test_outage_records_failing_hop_and_reports_it(self):
+        self.feed(UP, T0, 1)
+        self.feed(with_path(snap(host(False), host(False), mac_ok=False), True, True), T0 + 15, 2)
+        self.feed(with_path(snap(host(False), host(False), mac_ok=False), True, False), T0 + 45, 40)
+        view = self.feed(UP, T0 + 45 + 600, 1)
+        outage = view["outages"][0]
+        self.assertEqual(outage["where"], "modem")
+        self.assertEqual(outage["where_samples"], {"upstream": 2, "modem": 40})
+        self.assertIn("the router answered but the modem didn't", self.sent[0][1])
 
     def test_mac_dark_wakes_do_not_log_outages(self):
         # Asleep at home: a brief background wake every few minutes runs one
