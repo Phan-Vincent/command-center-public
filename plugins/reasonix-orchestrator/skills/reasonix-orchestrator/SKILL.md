@@ -14,8 +14,8 @@ human authorization. Worker results are advisory.
 The supervisor (Codex or Claude) may operate the external account directly in
 the user's already logged-in ChatGPT browser tab: choose the model, paste or
 upload material, submit, and read the response. Before each submission, visibly
-verify GPT-6.1 Sol at High effort or above (raise effort as the task needs), or
-a stronger verified model. Record model and effort; never silently downgrade.
+verify GPT-6.1 Sol at High effort or above (raise effort as the task needs),
+Astra at Medium or High effort, or a stronger verified model. Record model and effort; never silently downgrade.
 Never sign in, enter credentials, or solve CAPTCHAs; if the tab is logged out or
 blocked, stop and ask the user. Assume no local files or plugins on that side.
 Completion requires an observed response. This model floor does not apply to

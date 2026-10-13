@@ -25,9 +25,10 @@ Supply task identity, evidence, question, constraints, acceptance conditions,
 and return format. Exclude secrets, unrelated material, and provider
 configuration.
 
-Before submitting, visibly verify and record the model and effort. The floor is
-GPT-6.1 Sol at High effort, or a stronger verified model. Raise effort (Extra
-High, Max, and so on) when the task needs it; never go below High. Do not guess
+Before submitting, visibly verify and record the model and effort. Allowed models
+are GPT-6.1 Sol at High effort or above, Astra at Medium or High effort, or a
+stronger verified model. Raise Sol's effort (Extra High, Max, and so on) when
+the task needs it; never run Sol below High or Astra below Medium. Do not guess
 equivalence for an unfamiliar model or silently downgrade. If the floor is
 unavailable or unverifiable, report blocked or unknown and continue independent
 in-scope work.

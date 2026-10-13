@@ -138,7 +138,7 @@ The packager rejects absolute and parent-traversal paths, caps each excerpt and 
 
 ## External ChatGPT handoff
 
-The CLI itself has no browser runner. The supervisor agent (Codex or Claude) is authorized to operate the user's already logged-in external ChatGPT tab through its browser tools: select the model, submit the prompt, wait for the full response, and import it. It never signs in, enters or reads credentials, extracts cookies or session data, or solves CAPTCHAs; a logged-out, rate-limited, or blocked tab stops the handoff and goes back to the user. Every submission must visibly use GPT-6.1 Sol at High effort or above (higher when the task needs it), or a stronger verified model; record the model and effort.
+The CLI itself has no browser runner. The supervisor agent (Codex or Claude) is authorized to operate the user's already logged-in external ChatGPT tab through its browser tools: select the model, submit the prompt, wait for the full response, and import it. It never signs in, enters or reads credentials, extracts cookies or session data, or solves CAPTCHAs; a logged-out, rate-limited, or blocked tab stops the handoff and goes back to the user. Every submission must visibly use GPT-6.1 Sol at High effort or above (higher when the task needs it), Astra at Medium or High effort, or a stronger verified model; record the model and effort.
 
 Create and run a research task normally:
 
@@ -201,7 +201,7 @@ Task: “Research the current eBay Browse API pagination behavior and determine 
 
 1. Create the research task; the router selects `external_chatgpt`.
 2. Run the task and use `handoff --copy` to copy the generated prompt.
-3. The supervisor submits it in the logged-in external ChatGPT tab (GPT-6.1 Sol, High or above), then imports the complete answer with `complete --stdin`.
+3. The supervisor submits it in the logged-in external ChatGPT tab (GPT-6.1 Sol High or above, or Astra Medium/High), then imports the complete answer with `complete --stdin`.
 4. The supervisor preserves the answer and research provenance. If code analysis is needed, explicitly delegate to `reasonix_flash`, which proposes a patch without writing files.
 5. Delegate to `codex`; the CLI records a waiting handoff with the accumulated context.
 6. Codex inspects the live repository, implements the change, runs tests, and records completion with `complete --summary`.

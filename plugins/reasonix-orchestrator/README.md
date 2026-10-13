@@ -7,8 +7,8 @@ The core skill routes substantial self-contained drafting/analysis to the
 external ChatGPT account when worthwhile, and bounded repository work to
 Reasonix. The supervisor (Codex or Claude) may drive the user's already
 logged-in ChatGPT tab directly; it never signs in or handles credentials.
-External submissions must visibly use GPT-6.1 Sol at High effort or above, or a
-stronger verified model.
+External submissions must visibly use GPT-6.1 Sol at High effort or above, Astra at
+Medium or High effort, or a stronger verified model.
 
 MCP exposes `probe`, `delegate_read`, and `delegate_write`. Write requests require
 exact `authorize_writes:true`; the human request supplies actual authorization.

@@ -47,7 +47,7 @@ def _print_handoff(info: dict[str, Any], *, copied: bool = False) -> None:
     if copied:
         print("Clipboard: prompt copied with pbcopy")
     print("\nNext:")
-    print("Submit the prompt in the logged-in external ChatGPT tab (GPT-6.1 Sol, High or above).")
+    print("Submit the prompt in the logged-in external ChatGPT tab (GPT-6.1 Sol High or above, or Astra Medium/High).")
     print("Then run:")
     print(f"\n{info['next_command']}")
 
