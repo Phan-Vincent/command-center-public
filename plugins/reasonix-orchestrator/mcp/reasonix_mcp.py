@@ -15,7 +15,7 @@ from reasonix_process import guarded_run, ProcessFailure, CLEANUP_SECONDS
 from reasonix_engine import routing, WORKER_MODELS, ESCALATION_REASONS
 
 SERVER_NAME = "reasonix-orchestrator"
-SERVER_VERSION = "0.2.0"
+SERVER_VERSION = "0.2.1"
 PROTOCOL_VERSION = "2025-06-18"
 MAX_ERROR_CHARS = 20_000
 EXECUTION_GUARD_VERSION = 2

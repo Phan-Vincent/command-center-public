@@ -1,6 +1,6 @@
 {
   "name": "reasonix-orchestrator",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Shared Reasonix execution and policy with external-account routing, bounded objective accounting, and a DeepSeek compatibility entry point.",
   "author": {
     "name": "phan-vincent"
