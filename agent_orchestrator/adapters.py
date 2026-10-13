@@ -227,9 +227,9 @@ class ExternalChatGPTAdapter:
         )
         return normalize_result(
             task_id=task["task_id"], worker="external_chatgpt", status="waiting_for_user",
-            summary="External ChatGPT handoff is ready for the user.", started_at=handoff_created_at,
+            summary="External ChatGPT handoff is ready.", started_at=handoff_created_at,
             artifacts=[{"type": "external_prompt", "path": str(prompt_path), "created_at": handoff_created_at}],
-            recommended_next_action=f"Copy {prompt_path} into external ChatGPT, then import the answer with ./orchestrator complete {task['task_id']} --stdin.",
+            recommended_next_action=f"Submit {prompt_path} in the logged-in external ChatGPT tab (GPT-6.1 Sol, High or above), then import the answer with ./orchestrator complete {task['task_id']} --stdin.",
             uncertainties=["No external ChatGPT response has been imported yet."],
             metadata={"execution_mode": "manual_handoff", "handoff_created_at": handoff_created_at},
             execution_mode="manual_handoff",

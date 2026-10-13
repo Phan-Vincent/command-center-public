@@ -106,7 +106,7 @@ class ToolContractTests(unittest.TestCase):
                 {"dir": "/tmp", "task_contract": "bounded task", "max_steps": 0},
             )
 
-    @mock.patch.object(reasonix_mcp.subprocess, "run")
+    @mock.patch.object(reasonix_mcp, "guarded_run")
     def test_wrapper_json_becomes_structured_tool_result(self, run: mock.Mock) -> None:
         run.return_value = subprocess.CompletedProcess(
             args=[], returncode=0, stdout='{"ok":true,"version":"reasonix v1"}\n', stderr=""
@@ -116,7 +116,7 @@ class ToolContractTests(unittest.TestCase):
         self.assertEqual(result["structuredContent"]["version"], "reasonix v1")
         self.assertIsNone(run.call_args.kwargs["input"])
 
-    @mock.patch.object(reasonix_mcp.subprocess, "run")
+    @mock.patch.object(reasonix_mcp, "guarded_run")
     def test_result_records_worker_routing(self, run: mock.Mock) -> None:
         run.return_value = subprocess.CompletedProcess(
             args=[], returncode=0, stdout='{"ok":true}\n', stderr=""
@@ -134,7 +134,7 @@ class ToolContractTests(unittest.TestCase):
             },
         )
 
-    @mock.patch.object(reasonix_mcp.subprocess, "run")
+    @mock.patch.object(reasonix_mcp, "guarded_run")
     def test_malformed_wrapper_output_preserves_bounded_stderr(self, run: mock.Mock) -> None:
         run.return_value = subprocess.CompletedProcess(
             args=[], returncode=1, stdout="not-json", stderr="diagnostic detail"
@@ -144,7 +144,7 @@ class ToolContractTests(unittest.TestCase):
         self.assertEqual(result["structuredContent"]["exit_code"], 1)
         self.assertEqual(result["structuredContent"]["stderr"], "diagnostic detail")
 
-    @mock.patch.object(reasonix_mcp.subprocess, "run")
+    @mock.patch.object(reasonix_mcp, "guarded_run")
     def test_nonzero_wrapper_exit_cannot_report_success(self, run: mock.Mock) -> None:
         run.return_value = subprocess.CompletedProcess(
             args=[], returncode=1, stdout='{"ok":true}\n', stderr="wrapper failed"
@@ -153,6 +153,19 @@ class ToolContractTests(unittest.TestCase):
         self.assertTrue(result["isError"])
         self.assertFalse(result["structuredContent"]["ok"])
         self.assertEqual(result["structuredContent"]["exit_code"], 1)
+
+
+    @mock.patch.object(reasonix_mcp, "guarded_run")
+    def test_outer_wrapper_failure_keeps_identity_and_worker_stop_unknown(self, run):
+        from reasonix_process import ProcessFailure
+        run.side_effect = ProcessFailure("timeout", "", "", {"local_status": "stopped", "scope": "owned_local_process_group"})
+        result = reasonix_mcp.call_tool("delegate_read", {"dir": "/tmp", "task_contract": "bounded"})
+        payload = result["structuredContent"]
+        self.assertTrue(payload["task_id"])
+        self.assertEqual(payload["process"]["status"], "unknown")
+        self.assertEqual(payload["outcome"], "unknown")
+        self.assertEqual(payload["failure"]["code"], "TIMEOUT")
+
 
 
 class ProtocolTests(unittest.TestCase):

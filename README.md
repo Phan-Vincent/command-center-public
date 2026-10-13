@@ -263,10 +263,9 @@ scaffolded from.
 
 ## Claude Code plugin: deepseek-delegate
 
-`plugins/deepseek-delegate/` makes Claude plan and review while DeepSeek
-(via the Reasonix CLI) writes the code. Each task is verified, committed on its
-own and cost-logged. See [its README](plugins/deepseek-delegate/README.md) for
-setup (`/plugin marketplace add phan-vincent/command-center-public`) and a cost-check
-example. `plugins/reasonix-orchestrator/` is the Mac-local Reasonix MCP server.
-It installs from the same marketplace for Claude Code, and it's also the Codex
-plugin that `./orchestrator` uses.
+`plugins/reasonix-orchestrator/` contains the shared delegation policy, local MCP,
+CLI adapters, and bounded objective ledger. `plugins/deepseek-delegate/` is a
+compatibility distribution generated from that core. Both preserve user changes,
+run one attempt at a time, and leave Git mutations and acceptance to the supervisor.
+See [the core README](plugins/reasonix-orchestrator/README.md). This is separate
+from the dashboard's `./orchestrator` task runner.

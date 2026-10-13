@@ -10,7 +10,7 @@ Each worker assignment consumes one transition. Automatic retries against the sa
 
 Workers have deliberately different trust boundaries:
 
-- `external_chatgpt`: a human-operated, read-only external research worker. The CLI creates a complete prompt; the user manually runs it in external ChatGPT and imports the response.
+- `external_chatgpt`: a read-only external research worker in the user's external ChatGPT account. The CLI creates a complete prompt; the supervisor (Codex or Claude) submits it in the user's already logged-in ChatGPT browser tab, or the user does, and the response is imported.
 - `reasonix_flash`: default cheap reasoning and code proposals through the existing Reasonix stdio MCP server.
 - `reasonix_pro`: bounded high-complexity reasoning or an explicit escalation. Pro requires a recorded escalation reason.
 - `codex`: authoritative repository work, tests, debugging, Git, and final verification. The CLI produces a context handoff and waits; it never recursively launches Codex.
@@ -121,7 +121,7 @@ After three retryable Flash failures, non-repository work can escalate to Pro. I
 ./orchestrator ask "Analyze this bounded design choice" --worker reasonix_pro
 ```
 
-Automated workers print their final status and summary. External tasks print the existing manual handoff and import command. Clipboard use remains opt-in through `handoff --copy`.
+Automated workers print their final status and summary. External tasks print the handoff and import command. Clipboard use remains opt-in through `handoff --copy`.
 
 ## Context packaging
 
@@ -136,9 +136,9 @@ Add project-relative files at creation time:
 
 The packager rejects absolute and parent-traversal paths, caps each excerpt and the total package size, records omitted files, includes only a short prior result summary, and saves the package for inspection. It never dumps the full repository implicitly.
 
-## External ChatGPT manual handoff
+## External ChatGPT handoff
 
-External ChatGPT is intentionally human-operated. There is no browser runner, DOM scraping, cookie access, session extraction, or automated authentication.
+The CLI itself has no browser runner. The supervisor agent (Codex or Claude) is authorized to operate the user's already logged-in external ChatGPT tab through its browser tools: select the model, submit the prompt, wait for the full response, and import it. It never signs in, enters or reads credentials, extracts cookies or session data, or solves CAPTCHAs; a logged-out, rate-limited, or blocked tab stops the handoff and goes back to the user. Every submission must visibly use GPT-6.1 Sol at High effort or above (higher when the task needs it), or a stronger verified model; record the model and effort.
 
 Create and run a research task normally:
 
@@ -163,7 +163,7 @@ Inspect the handoff or copy the prompt on macOS:
 ./orchestrator handoff TASK_ID --copy
 ```
 
-Paste the prompt into the manually authenticated external ChatGPT account. Then import the entire response either interactively:
+Submit the prompt in the logged-in external ChatGPT tab after confirming the model and effort. Then import the entire response either interactively:
 
 ```bash
 ./orchestrator complete TASK_ID --stdin
@@ -175,7 +175,7 @@ Paste the response and finish input with the normal terminal EOF keystroke, or i
 ./orchestrator complete TASK_ID --file response.txt
 ```
 
-The raw response is preserved both in the normalized result and as a text artifact. Provenance remains `worker: external_chatgpt` with `execution_mode: manual_handoff`. Importing the answer completes the existing attempt; it does not consume another worker transition or delegation-depth slot. The completed task may then be explicitly delegated to Reasonix or Codex if repository work is needed.
+The raw response is preserved both in the normalized result and as a text artifact. Provenance remains `worker: external_chatgpt` with `execution_mode: manual_handoff` (the stored name for a prompt-file handoff, whoever submits it). Importing the answer completes the existing attempt; it does not consume another worker transition or delegation-depth slot. The completed task may then be explicitly delegated to Reasonix or Codex if repository work is needed.
 
 ## Recording Codex or manual completion
 
@@ -201,7 +201,7 @@ Task: “Research the current eBay Browse API pagination behavior and determine 
 
 1. Create the research task; the router selects `external_chatgpt`.
 2. Run the task and use `handoff --copy` to copy the generated prompt.
-3. Paste it into the external ChatGPT account, then import the complete answer with `complete --stdin`.
+3. The supervisor submits it in the logged-in external ChatGPT tab (GPT-6.1 Sol, High or above), then imports the complete answer with `complete --stdin`.
 4. The supervisor preserves the answer and research provenance. If code analysis is needed, explicitly delegate to `reasonix_flash`, which proposes a patch without writing files.
 5. Delegate to `codex`; the CLI records a waiting handoff with the accumulated context.
 6. Codex inspects the live repository, implements the change, runs tests, and records completion with `complete --summary`.
@@ -217,10 +217,10 @@ Add the worker name to the schema, implement a small adapter returning the norma
 - The canonical repository remains under Codex/local control.
 - Delegated Reasonix and external workers are read-only proposal generators.
 - Existing Reasonix provider configuration remains owned by Reasonix; this project never reads or copies it.
-- External ChatGPT authentication and operation remain entirely user-controlled.
+- External ChatGPT authentication stays with the user. The supervisor may operate an already logged-in tab but never signs in or touches credentials.
 - Runtime results can contain sensitive source context; protect `data/orchestrator/` like the repository itself.
 - v1 has local file locking and duplicate-state checks, not distributed leases or crash recovery.
-- No browser automation, scraping, cookie access, CAPTCHA handling, or credential storage is included.
+- The CLI includes no browser automation, scraping, cookie access, CAPTCHA handling, or credential storage; browser use belongs to the supervisor agent.
 - No dashboard or background scheduler is included; those are intentionally later milestones.
 
 ## Troubleshooting
@@ -228,6 +228,6 @@ Add the worker name to the schema, implement a small adapter returning the norma
 - “Reasonix MCP server was not found”: set `REASONIX_MCP_SERVER` to the existing plugin server.
 - Reasonix failure or timeout: inspect the structured error and per-attempt history. Retryable failures are attempted at most three times before a bounded escalation; permanent failures stop immediately. Do not bypass permissions.
 - “Session is in use”: wait for the other bounded run to finish or close the duplicate Reasonix project window; do not stop the managed MCP tunnel.
-- External worker waits: run `handoff TASK_ID`, use the prompt manually, then import the answer with `complete --stdin` or `complete --file`.
+- External worker waits: run `handoff TASK_ID`, submit the prompt in the logged-in ChatGPT tab, then import the answer with `complete --stdin` or `complete --file`.
 - Maximum depth reached: inspect the complete history; create a deliberate child task rather than silently extending an agent loop.
 - Malformed state: do not overwrite it. Preserve the JSON and event log for diagnosis.

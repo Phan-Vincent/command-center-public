@@ -1,16 +1,23 @@
 {
   "name": "reasonix-orchestrator",
-  "version": "0.1.1",
-  "description": "Mac-local stdio MCP server (probe, delegate_read, delegate_write) that runs bounded Reasonix/DeepSeek workers on this Mac or an explicitly named SSH host.",
+  "version": "0.2.0",
+  "description": "Shared Reasonix execution and policy with external-account routing, bounded objective accounting, and a DeepSeek compatibility entry point.",
   "author": {
     "name": "phan-vincent"
   },
   "repository": "https://github.com/phan-vincent/command-center-public",
-  "keywords": ["reasonix", "deepseek", "mcp", "orchestration"],
+  "keywords": [
+    "reasonix",
+    "deepseek",
+    "mcp",
+    "orchestration"
+  ],
   "mcpServers": {
     "reasonix": {
       "command": "python3",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/reasonix_mcp.py"]
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/mcp/reasonix_mcp.py"
+      ]
     }
   }
 }

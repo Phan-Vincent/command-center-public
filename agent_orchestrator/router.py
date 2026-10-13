@@ -77,7 +77,7 @@ def route_task(
     if requirements["human_account"]:
         return _decision(
             "external_chatgpt", "human_account_required", requirements,
-            ["human_account=true; a manual external ChatGPT handoff is required"],
+            ["human_account=true; a external ChatGPT handoff is required"],
         )
     if requirements["web_research"] or requirements["current_information"]:
         reasons = []

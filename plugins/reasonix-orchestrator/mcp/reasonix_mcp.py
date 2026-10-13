@@ -7,22 +7,21 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import uuid
 from typing import Any, TextIO
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from reasonix_process import guarded_run, ProcessFailure, CLEANUP_SECONDS
+from reasonix_engine import routing, WORKER_MODELS, ESCALATION_REASONS
 
 SERVER_NAME = "reasonix-orchestrator"
-SERVER_VERSION = "0.1.1"
+SERVER_VERSION = "0.2.0"
 PROTOCOL_VERSION = "2025-06-18"
 MAX_ERROR_CHARS = 20_000
-WORKER_MODELS = {
-    "flash": "deepseek-flash",
-    "pro": "deepseek-pro",
-}
-ESCALATION_REASONS = {
-    "explicit_request",
-    "high_complexity",
-    "flash_verification_failed",
-}
+EXECUTION_GUARD_VERSION = 2
+DEFAULT_WORKER_TIMEOUT_SECONDS = 90
+WRAPPER_OVERHEAD_SECONDS = 1
+OUTER_CLEANUP_SECONDS = CLEANUP_SECONDS + 2
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 WRAPPER_PATH = (
     PLUGIN_ROOT
@@ -52,6 +51,8 @@ COMMON_PROPERTIES: dict[str, Any] = {
 
 RUN_PROPERTIES: dict[str, Any] = {
     **COMMON_PROPERTIES,
+    "task_id": {"type": "string", "minLength": 1, "maxLength": 4096,
+                "description": "Reuse the same objective ID across CLI/MCP continuations."},
     "task_contract": {
         "type": "string",
         "minLength": 1,
@@ -197,16 +198,10 @@ def append_optional(argv: list[str], arguments: dict[str, Any], name: str) -> No
 
 
 def worker_routing(arguments: dict[str, Any]) -> tuple[str, str | None]:
-    worker_tier = arguments.get("worker_tier", "flash")
-    if worker_tier not in WORKER_MODELS:
-        raise McpError(-32602, "worker_tier must be flash or pro")
-    escalation_reason = arguments.get("escalation_reason")
-    if worker_tier == "pro":
-        if escalation_reason not in ESCALATION_REASONS:
-            raise McpError(-32602, "a Pro worker requires a valid escalation_reason")
-    elif escalation_reason is not None:
-        raise McpError(-32602, "escalation_reason is valid only with worker_tier=pro")
-    return WORKER_MODELS[worker_tier], escalation_reason
+    try:
+        return routing(arguments.get("worker_tier", "flash"), arguments.get("escalation_reason"))
+    except ValueError as exc:
+        raise McpError(-32602, str(exc)) from exc
 
 
 def wrapper_command(tool_name: str, arguments: dict[str, Any]) -> tuple[list[str], str | None]:
@@ -231,13 +226,15 @@ def wrapper_command(tool_name: str, arguments: dict[str, Any]) -> tuple[list[str
         if arguments.get("authorize_writes") is not True:
             raise McpError(-32602, "delegate_write requires authorize_writes=true")
         argv.append("--authorize-writes")
-    for name in ("host", "effort", "max_steps", "timeout_seconds"):
+    for name in ("host", "effort", "max_steps", "timeout_seconds", "task_id", "escalation_reason"):
         append_optional(argv, arguments, name)
+    if "timeout_seconds" not in arguments:
+        argv.extend(["--timeout-seconds", str(DEFAULT_WORKER_TIMEOUT_SECONDS)])
     return argv, stdin_text
 
 
 def call_tool(name: str, arguments: Any) -> dict[str, Any]:
-    values = require_object(arguments, "arguments")
+    values = dict(require_object(arguments, "arguments"))
     allowed = set(COMMON_PROPERTIES)
     if name != "probe":
         allowed.update(RUN_PROPERTIES)
@@ -247,6 +244,8 @@ def call_tool(name: str, arguments: Any) -> dict[str, Any]:
     if unknown:
         raise McpError(-32602, f"unexpected argument(s): {', '.join(unknown)}")
 
+    if name != "probe" and "task_id" not in values:
+        values["task_id"] = str(uuid.uuid4())
     argv, stdin_text = wrapper_command(name, values)
     routing: dict[str, Any] | None = None
     if name != "probe":
@@ -257,13 +256,22 @@ def call_tool(name: str, arguments: Any) -> dict[str, Any]:
             "escalation_reason": escalation_reason,
         }
     try:
-        completed = subprocess.run(
+        timeout_seconds = values.get("timeout_seconds", 20 if name == "probe" else DEFAULT_WORKER_TIMEOUT_SECONDS)
+        completed = guarded_run(
             argv,
             input=stdin_text,
-            text=True,
-            capture_output=True,
-            check=False,
+            timeout=timeout_seconds + CLEANUP_SECONDS + WRAPPER_OVERHEAD_SECONDS,
+            cleanup_seconds=OUTER_CLEANUP_SECONDS,
+            term_grace=CLEANUP_SECONDS + .5,
         )
+    except ProcessFailure as exc:
+        payload = {
+            "ok": False, "operation": name, "stage": "wrapper",
+            "error": f"Reasonix wrapper {exc.kind}", "error_code": exc.kind.upper(),
+            "exit_code": exc.exit_code,
+            "stdout": bounded_error(exc.stdout), "stderr": bounded_error(exc.stderr),
+            "process": {**exc.process, "remote_status": "unknown" if values.get("host") else "not_applicable"},
+        }
     except OSError as exc:
         payload = {"ok": False, "error": f"failed to launch Reasonix wrapper: {exc}"}
     else:
@@ -291,6 +299,30 @@ def call_tool(name: str, arguments: Any) -> dict[str, Any]:
 
     if routing is not None:
         payload["routing"] = routing
+    if payload.get("ok") is not True and not isinstance(payload.get("failure"), dict):
+        payload["failure"] = {
+            "code": str(payload.get("error_code", "WRAPPER_FAILURE"))[:128],
+            "stage": str(payload.get("stage", "wrapper_result"))[:128],
+            "message": str(payload.get("error", "Reasonix wrapper failed"))[:4000],
+        }
+    if name != "probe" and "task_id" not in payload:
+        # An outer wrapper stop is not evidence that its separately grouped
+        # worker stopped. Preserve correlation and report the uncertainty.
+        payload["task_id"] = values["task_id"]
+        payload["outcome"] = "partial" if payload.get("ok") is True else "unknown"
+        payload["scope"] = {"operation": "read" if name == "delegate_read" else "write",
+                            "target": values["dir"], "host": values.get("host"),
+                            "inspected_files": "unknown", "changed_files": "unknown", "deviations": "unknown"}
+        payload["changes"] = []
+        payload["verification"] = {"status": "not_run", "checks": []}
+        payload.setdefault("process", {})["status"] = "unknown"
+        payload["unresolved"] = ["Worker termination and supervisor acceptance are not established."]
+        payload["risks"] = ["Outer wrapper cleanup does not prove separately grouped worker termination."]
+        payload["usage"] = {"model": routing["model"], "effort": values.get("effort", "unknown"),
+                            "attempts": "unknown", "tokens": "unknown", "cost": "unknown",
+                            "measurement_source": "unknown"}
+    payload["execution_guard_version"] = EXECUTION_GUARD_VERSION
+    payload["consolidation_version"] = 1
 
     encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     return {
@@ -370,6 +402,9 @@ def serve(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> int:
         if response is not None:
             stdout.write(json.dumps(response, ensure_ascii=False, separators=(",", ":")) + "\n")
             stdout.flush()
+            result = response.get("result", {})
+            if isinstance(result, dict) and result.get("structuredContent", {}).get("error_code") == "CANCELLED":
+                return 130
     return 0
 
 
