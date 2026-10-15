@@ -170,6 +170,16 @@ restarts don't re-send; failed sends retry after a minute. Alerts on an
 unreachable host are held until the host answers rather than reported as
 resolved.
 
+Host-down and offline alerts are judged from this MacBook's own connection, so
+they're guarded against sleep. A gap of more than
+`notify.max_sample_gap_seconds` (default 120) between collections means the
+MacBook was asleep, and its brief dark wakes collect before Tailscale
+reconnects. The first collection after a gap can't start one of these alerts,
+and any not yet sent start their `min_active_seconds` over, as do any loaded
+from the state file at startup. They only fire after being seen down for the
+whole debounce while the MacBook is awake. hermes going down while the MacBook
+sleeps is covered by the hermes heartbeat (below).
+
 `./run.sh install` also installs `healthcheck.py` as a second launchd job. It
 polls `/api/health` every `healthcheck.interval_seconds` and, after
 `fail_threshold` failures in a row (no answer, or no completed collection for

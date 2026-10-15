@@ -211,6 +211,64 @@ class AlertNotificationTests(unittest.TestCase):
         self.assertEqual(len(self.sent), 2)
         self.assertIn("RESOLVED", self.sent[1])
 
+    def host_down_config(self):
+        cfg = config(self.state_file, webhooks=[{"id": "discord", "type": "discord", "url": "http://unused"}])
+        cfg["alerts"]["rules"] = [
+            {"id": "host-down", "type": "host", "state": "unreachable", "severity": "critical"}]
+        return cfg
+
+    def test_dark_wakes_never_fire_host_down(self):
+        cfg = self.host_down_config()
+        down = {"hosts": {"hermes": {"reachable": False}, "acer": {"reachable": False}}}
+        # Mac asleep: a few collections per dark wake, ~15 min apart, for hours.
+        for wake in range(12):
+            self.run_evals(down, cfg, T0 + wake * 900, 5, step=20)  # 80 s awake each time
+        self.assertEqual(self.sent, [])
+
+    def test_host_down_fires_once_mac_is_awake_and_watching(self):
+        cfg = self.host_down_config()
+        up = {"hosts": {"hermes": {"reachable": True}}}
+        down = {"hosts": {"hermes": {"reachable": False}}}
+        self.run_evals(up, cfg, T0, 4)
+        self.run_evals(down, cfg, T0 + 60, 8)  # 60..165 s: debouncing, no gap
+        self.assertEqual(self.sent, [])
+        self.run_evals(down, cfg, T0 + 180, 4)
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("host hermes is unreachable", self.sent[0])
+
+    def test_first_sample_after_gap_cannot_start_host_down(self):
+        cfg = self.host_down_config()
+        down = {"hosts": {"hermes": {"reachable": False}}}
+        self.run_evals(down, cfg, T0, 4)
+        self.run_evals(down, cfg, T0 + 600, 9)  # asleep in between: starts over at T0+615
+        self.assertEqual(self.sent, [], "only 105 s watched since waking")
+        self.run_evals(down, cfg, T0 + 750, 1)
+        self.assertEqual(len(self.sent), 1)
+
+    def test_restart_drops_unannounced_host_down_from_state_file(self):
+        cfg = self.host_down_config()
+        down = {"hosts": {"hermes": {"reachable": False}}}
+        self.run_evals(down, cfg, T0, 4)  # 45 s: saved, not yet announced
+        alerts.reset_state()  # server restart hours later
+        self.run_evals(down, cfg, T0 + 7200, 8)
+        self.assertEqual(self.sent, [], "the old first_seen must not count")
+        self.run_evals(down, cfg, T0 + 7320, 1)
+        self.assertEqual(len(self.sent), 1)
+
+    def test_gap_keeps_announced_host_down_and_other_rules(self):
+        cfg = self.host_down_config()
+        cfg["alerts"]["rules"].append({"id": "pokemon-service", "type": "pokemon_service", "severity": "critical"})
+        down = {"hosts": {"hermes": {"reachable": False}}}
+        self.run_evals(down, cfg, T0, 12)
+        self.run_evals(status(tunnel="inactive"), cfg, T0 + 3600, 1)  # woke: hermes back, tunnel down
+        active = alerts.evaluate(down, cfg, now=T0 + 3615)
+        self.assertEqual({a["rule"] for a in active}, {"host-down"})
+        self.assertEqual(len(self.sent), 1, "an announced host-down isn't re-sent or resolved by a gap")
+        self.run_evals(status(tunnel="inactive"), cfg, T0 + 7200, 1)
+        self.run_evals(status(tunnel="inactive"), cfg, T0 + 7210, 15, step=10)
+        self.assertEqual(sum("CRITICAL" in s and "tunnel" in s for s in self.sent), 1,
+                         "non-reachability alerts still debounce across a gap as before")
+
 
 class WebhookDeliveryTests(unittest.TestCase):
     def setUp(self):

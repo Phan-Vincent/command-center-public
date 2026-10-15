@@ -10,6 +10,14 @@ Notification lifecycle (per alert key = host|rule|subject, per webhook):
     held rather than resolved, since their facts can't be confirmed;
   * failed sends are retried on later evaluations, after a short per-webhook
     backoff.
+
+A gap of more than `notify.max_sample_gap_seconds` since the previous
+evaluation means the MacBook was asleep. Its brief
+background wakes collect before Tailscale reconnects, so every host looks
+unreachable. Host and offline alerts therefore can't start in the first
+evaluation after a gap, and any not yet announced are dropped: their
+debounce has to run while the MacBook is awake and watching. Unannounced ones
+loaded from the state file when the server starts are dropped the same way.
 """
 
 import json
@@ -24,13 +32,15 @@ import notify
 BASE = Path(__file__).resolve().parent
 RETRY_BACKOFF_SECONDS = 60
 RESOLVED_TTL_SECONDS = 24 * 3600  # give up on undeliverable recoveries after a day
+DEFAULT_MAX_SAMPLE_GAP_SECONDS = 120
+SLEEP_GUARDED_TYPES = ("host", "offline")  # judged from the MacBook's own connection
 
 # key -> {"alert": {...}, "first_seen": epoch, "notified": [webhook ids], "missing_since"?: epoch}
 _STATE = {}
 # key -> {"alert": {...}, "first_seen", "resolved_at", "pending": [webhook ids]}
 _RESOLVED = {}
 _BACKOFF = {}  # webhook id -> epoch before which it is skipped
-_LOADED = {"path": None, "saved": None}
+_LOADED = {"path": None, "saved": None, "last_eval": None}
 _LOCK = threading.Lock()
 
 
@@ -165,7 +175,7 @@ def reset_state():
         _STATE.clear()
         _RESOLVED.clear()
         _BACKOFF.clear()
-        _LOADED.update(path=None, saved=None)
+        _LOADED.update(path=None, saved=None, last_eval=None)
 
 
 def _key(a):
@@ -225,6 +235,7 @@ def evaluate(status, cfg, now=None):
     webhooks = acfg.get("webhooks") or []
     notify_cfg = acfg.get("notify") or {}
     debounce = _num(notify_cfg.get("min_active_seconds", 0)) or 0
+    max_gap = _num(notify_cfg.get("max_sample_gap_seconds", DEFAULT_MAX_SAMPLE_GAP_SECONDS))
     now = time.time() if now is None else now
     hosts = status.get("hosts", {})
     raw = []
@@ -234,10 +245,18 @@ def evaluate(status, cfg, now=None):
     with _LOCK:  # held across sends: evaluations are serialized, so nothing double-sends
         path = _state_path(notify_cfg)
         _load(path)
+        last, _LOADED["last_eval"] = _LOADED["last_eval"], now
+        woke = last is not None and max_gap is not None and now - last > max_gap
+        if woke or last is None:  # asleep, or the server was down: unannounced ones start over
+            for key, entry in list(_STATE.items()):
+                if not entry["notified"] and entry["alert"].get("type") in SLEEP_GUARDED_TYPES:
+                    del _STATE[key]
 
         current = {}
         for a in raw:
             key = a["key"] = _key(a)
+            if woke and a.get("type") in SLEEP_GUARDED_TYPES and key not in _STATE:
+                continue  # just woke: Tailscale may not have reconnected yet
             entry = _STATE.setdefault(key, {"first_seen": now, "notified": []})
             entry["alert"] = {k: a.get(k) for k in ("host", "rule", "type", "severity", "message")}
             entry.pop("missing_since", None)
