@@ -76,7 +76,6 @@
       "exec": [
         { "id": "unit-status", "label": "systemctl status", "cmd": "systemctl --user status {arg} --no-pager", "arg": "unit" },
         { "id": "unit-log", "label": "journalctl (unit)", "cmd": "journalctl --user -u {arg} -n 80 --no-pager", "arg": "unit" },
-        { "id": "container-log", "label": "docker logs", "cmd": "docker logs {arg} --tail 80 2>&1", "arg": "container" },
         { "id": "df", "label": "df -h", "cmd": "df -h", "arg": "none" },
         { "id": "free", "label": "free -h", "cmd": "free -h", "arg": "none" },
         { "id": "uptime", "label": "uptime", "cmd": "uptime", "arg": "none" }
