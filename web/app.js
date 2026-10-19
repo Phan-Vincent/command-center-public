@@ -201,6 +201,11 @@ function hostIssues(id, h) {
   return out;
 }
 
+function alertSectionKey(a) {
+  // A Pokemon alert belongs to the scanner section that explains it, not System.
+  return String(a.type || a.rule || "").startsWith("pokemon") ? "pokemon" : "system";
+}
+
 function deriveIssues(s) {
   const issues = [];
   const seen = new Set();
@@ -224,7 +229,7 @@ function deriveIssues(s) {
         return;
       }
     }
-    add(makeIssue(`alert:${hostId}:${a.severity || ""}:${a.message || ""}`, "alert", hostId, hostLabel, alertTitle(hostId, hostLabel, a.message), sev, "system"));
+    add(makeIssue(`alert:${hostId}:${a.severity || ""}:${a.message || ""}`, "alert", hostId, hostLabel, alertTitle(hostId, hostLabel, a.message), sev, alertSectionKey(a)));
   });
   const net = s.home_internet;
   if (net && (net.state === "down" || net.state === "unreachable")) {
@@ -280,6 +285,7 @@ function render() {
   renderSummary(s.summary, s.home_internet);
   if (!$("internet-drawer").hidden) renderInternetDrawer();
   renderAlertBanner(s.alerts || []);
+  if (!$("alerts-drawer").hidden) renderAlertsDrawer(); // keep an open drawer in sync
   deriveIssues(s);
   renderHostChips(s);
   renderMobileSelect(s);
@@ -814,8 +820,11 @@ async function runExec(host) {
   const argType = verbSel.options[verbSel.selectedIndex].dataset.arg || "none";
   let arg = "";
   if (argType !== "none" && targetSel) {
-    const [type, name] = (targetSel.value || "").split(":");
-    arg = name || "";
+    // Options look like `unit:<name>` / `container:<name>`, and a unit name may
+    // itself contain colons (`fixture@12:34.service`), so split only on the first.
+    const selected = targetSel.value || "";
+    const sep = selected.indexOf(":");
+    arg = sep < 0 ? "" : selected.slice(sep + 1);
     if (!arg) {
       const msg = "select a target";
       setActionOutput(msg, true);

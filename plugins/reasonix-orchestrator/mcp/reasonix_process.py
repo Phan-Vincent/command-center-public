@@ -11,6 +11,7 @@ from typing import Sequence
 
 
 CLEANUP_SECONDS = 2.0
+CANCELLATION_SIGNALS = (signal.SIGINT, signal.SIGTERM)
 
 
 class ProcessFailure(Exception):
@@ -107,6 +108,55 @@ def _cleanup(proc, grouped, stdout, stderr, seconds, term_grace):
             signal.signal(sig, handler)
 
 
+def _install_cancellation_handlers(handler) -> dict:
+    """Install cancellation handlers on the main thread; other threads own nothing."""
+    saved = {}
+    if threading.current_thread() is not threading.main_thread():
+        return saved
+    for sig in CANCELLATION_SIGNALS:
+        saved[sig] = signal.signal(sig, handler)
+    return saved
+
+
+def _unblock_cancellation_signals():
+    """Let pending SIGINT/SIGTERM reach the handlers installed for them.
+
+    A launcher (shell, MCP host, service manager) can hand this process a blocked
+    mask, in which case an installed handler never runs and cancellation degrades
+    to a timeout. Returns the previous mask for restoration, or None where
+    pthread_sigmask is unavailable (non-POSIX) or the mask cannot be read.
+    """
+    mask = getattr(signal, 'pthread_sigmask', None)
+    if mask is None:
+        return None
+    try:
+        previous = mask(signal.SIG_BLOCK, [])
+        mask(signal.SIG_UNBLOCK, CANCELLATION_SIGNALS)
+    except (ValueError, OSError):
+        return None
+    except BaseException:
+        # A signal delivered by the unblock is raised from inside the call; the
+        # caller still needs its own mask back before unwinding.
+        try:
+            mask(signal.SIG_SETMASK, previous)
+        except (ValueError, OSError):
+            pass
+        raise
+    return previous
+
+
+def _restore_cancellation(saved: dict, previous_mask) -> None:
+    """Restore the caller's mask first, so a late signal cannot pre-empt handlers."""
+    mask = getattr(signal, 'pthread_sigmask', None)
+    if previous_mask is not None and mask is not None:
+        try:
+            mask(signal.SIG_SETMASK, previous_mask)
+        except (ValueError, OSError):
+            pass
+    for sig, handler in saved.items():
+        signal.signal(sig, handler)
+
+
 def guarded_run(argv: Sequence[str], *, input: str | None = None,
                 timeout: float, cwd: str | None = None, env: dict | None = None,
                 cleanup_seconds: float = CLEANUP_SECONDS, term_grace: float = 0):
@@ -122,6 +172,7 @@ def guarded_run(argv: Sequence[str], *, input: str | None = None,
     proc = None
     pending_signal = None
     saved = {}
+    previous_mask = None
 
     def cancel(signum, frame):
         nonlocal pending_signal
@@ -130,10 +181,12 @@ def guarded_run(argv: Sequence[str], *, input: str | None = None,
         if proc is not None:
             raise KeyboardInterrupt
 
-    if threading.current_thread() is threading.main_thread():
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            saved[sig] = signal.signal(sig, cancel)
     try:
+        # Handlers first, then unblock: a mask inherited from the launcher would
+        # otherwise hold a pending SIGINT/SIGTERM back until it became a timeout.
+        saved = _install_cancellation_handlers(cancel)
+        # Off the main thread nothing was installed, so the caller's mask stays.
+        previous_mask = _unblock_cancellation_signals() if saved else None
         if pending_signal is not None:
             raise KeyboardInterrupt
         proc = subprocess.Popen(list(argv), stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
@@ -173,5 +226,4 @@ def guarded_run(argv: Sequence[str], *, input: str | None = None,
         stdout, stderr, state = _cleanup(proc, grouped, "", "", cleanup_seconds, term_grace)
         raise ProcessFailure("cancelled", stdout, stderr, state) from None
     finally:
-        for sig, handler in saved.items():
-            signal.signal(sig, handler)
+        _restore_cancellation(saved, previous_mask)

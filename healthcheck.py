@@ -44,9 +44,42 @@ def probe(port, timeout, stale_after):
     return True, "ok"
 
 
+def _number(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value
+
+
+def _clean_state(raw):
+    """Keep only well-formed state fields; a corrupt file must not crash a check.
+
+    `step` reads these fields directly (`failures`, `down_since`, `notified`,
+    `recovery_pending`), so a hand-edited or truncated state file has to degrade
+    to a clean one instead of raising and skipping the health report.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    state = {}
+    failures = _number(raw.get("failures"))
+    if failures is not None:
+        state["failures"] = int(failures)
+    for key in ("first_failure", "down_since"):
+        value = _number(raw.get(key))
+        if value is not None:
+            state[key] = value
+    for key in ("notified", "recovery_pending"):
+        value = raw.get(key)
+        if isinstance(value, list):
+            state[key] = [v for v in value if isinstance(v, str)]
+    for key in ("recovery_text", "detail"):
+        if isinstance(raw.get(key), str):
+            state[key] = raw[key]
+    return state
+
+
 def load_state(path):
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return _clean_state(json.loads(path.read_text(encoding="utf-8")))
     except (OSError, ValueError):
         return {}
 
@@ -71,7 +104,8 @@ def step(state, healthy, detail, webhooks, threshold, now=None, send=notify.send
         state["failures"] = 0
         pending = []
         for wid in state.get("recovery_pending", []):
-            if wid in targets and not send(targets[wid], state["recovery_text"]):
+            text = state.get("recovery_text") or "✅ **RESOLVED** · command-center dashboard is answering again"
+            if wid in targets and not send(targets[wid], text):
                 pending.append(wid)
         state["recovery_pending"] = pending
         return state
@@ -85,6 +119,7 @@ def step(state, healthy, detail, webhooks, threshold, now=None, send=notify.send
     if state.get("down_since") is None:
         state["down_since"] = state["first_failure"]
         state["notified"] = []
+    state.setdefault("notified", [])
     text = f"🔴 **CRITICAL** · command-center dashboard is down: {detail}"
     for wid, wh in targets.items():
         if wid not in state["notified"] and send(wh, text):

@@ -40,6 +40,12 @@ _LAST_GOOD = {}
 # Config keys that are UI metadata, never overwritten by stale facts.
 _CFG_META_KEYS = {"name", "label", "role", "connect", "os_hint", "agents", "links", "actions", "exec", "id"}
 
+# Keys that describe the current collection attempt. They must never be cached
+# as last-known-good facts: restoring `reachable`/`stale`/`errors` from the
+# cache would report a failed collection as healthy with no errors.
+_COLLECTION_KEYS = frozenset({"id", "as_of", "reachable", "stale", "errors"})
+_CACHE_EXCLUDED_KEYS = _CFG_META_KEYS | _COLLECTION_KEYS
+
 
 def load_config():
     with open(CONFIG_PATH) as f:
@@ -306,13 +312,13 @@ def _collect_one(key, cfg_host, cfg):
             facts = collect_remote(key, cfg_host, timeout=cfg["server"]["collect_timeout_seconds"])
         entry["reachable"] = True
         entry.update(facts)
-        _LAST_GOOD[key] = dict(facts)
+        _LAST_GOOD[key] = {k: v for k, v in facts.items() if k not in _CACHE_EXCLUDED_KEYS}
     except Exception as e:  # noqa: BLE001
         entry["errors"].append(f"{type(e).__name__}: {e}")
         err = str(e)
         if key in _LAST_GOOD:
             for k, v in _LAST_GOOD[key].items():
-                if k not in _CFG_META_KEYS:
+                if k not in _CACHE_EXCLUDED_KEYS:
                     entry[k] = v
             entry["stale"] = True
     entry["as_of"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())

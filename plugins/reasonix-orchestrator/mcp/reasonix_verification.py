@@ -28,6 +28,14 @@ def changed(before, after):
     return sorted(k for k in before.keys() | after.keys() if before.get(k) != after.get(k))
 
 
+def expected_files(files):
+    """Trim the authorized file list; blank and whitespace-only entries are dropped."""
+    if not files:
+        return []
+    entries = files.split(',') if isinstance(files, str) else list(files)
+    return [name.strip() for name in entries if isinstance(name, str) and name.strip()]
+
+
 def check(command, root, timeout):
     """Only explicit caller-supplied commands; no generated checks."""
     try:
@@ -94,8 +102,17 @@ def verify(payload, args, before, remaining):
             mark_failure(payload, exc.kind if exc.kind in ('timeout', 'cancelled') else 'unknown',
                          'SCOPE_CHECK_FAILED', 'Final scope snapshot failed')
             return
-        deviations = sorted(set(paths) - set(args.files.split(',')))
-        payload['scope'].update(changed_files=paths, deviations=deviations)
+        except (ValueError, OSError) as exc:
+            # An ordinary snapshot error says nothing about what the worker
+            # touched. Keep the stopped-process evidence, report the scope as
+            # unknown, and finish accounting without authorizing another attempt.
+            payload['scope'].update(changed_files='unknown', deviations='unknown',
+                                    snapshot='failed', snapshot_error=type(exc).__name__)
+            mark_failure(payload, 'unknown', 'SCOPE_CHECK_FAILED',
+                         'Final scope snapshot failed: ' + str(exc)[:1000])
+            return
+        deviations = sorted(set(paths) - set(expected_files(args.files)))
+        payload['scope'].update(changed_files=paths, deviations=deviations, snapshot='ok')
         payload['changes'] = paths
         if deviations:
             mark_failure(payload, 'scope', 'SCOPE_DEVIATION', 'Out-of-scope changes retained for supervisor review')

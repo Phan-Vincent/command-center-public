@@ -79,12 +79,13 @@ class ControlTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "audit.jsonl"
             # max_bytes smaller than one line forces rotation after the first write
-            control.audit({"ts": "t", "cmd": "echo hi", "stdout": "x" * 100}, path=path, max_bytes=10)
-            control.audit({"ts": "t", "cmd": "echo hi", "stdout": "y" * 100}, path=path, max_bytes=10)
-            self.assertTrue(path.exists() or path.with_name("audit.jsonl.1").exists())
-            # read_audit on the rotated file should still return entries
-            entries = control.read_audit(limit=50, path=path)
-            self.assertGreaterEqual(len(entries), 0)
+            # The long first line overflows max_bytes and rotates; the short second one stays.
+            control.audit({"ts": "1", "cmd": "echo hi", "stdout": "x " * 60}, path=path, max_bytes=120)
+            control.audit({"ts": "2", "cmd": "echo hi", "stdout": "y"}, path=path, max_bytes=120)
+            self.assertTrue(path.with_name("audit.jsonl.1").exists())
+            # Rotated entries come first, and the limit keeps the newest.
+            self.assertEqual([e["ts"] for e in control.read_audit(limit=50, path=path)], ["1", "2"])
+            self.assertEqual([e["ts"] for e in control.read_audit(limit=1, path=path)], ["2"])
 
     @staticmethod
     def _reboot_cfg():

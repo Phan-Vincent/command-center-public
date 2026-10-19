@@ -82,12 +82,31 @@ def _summarize(status, active_alerts):
     }
 
 
+def _evaluate_alerts(fresh, cfg):
+    """Evaluate alerts, keeping the last known list if evaluation blows up.
+
+    A failed evaluation must not blank the alert list (that would look like
+    every open alert resolved) and must not stop the fresh snapshot from being
+    published: a bad state file shouldn't also wedge collection.
+    """
+    try:
+        return alerts.evaluate(fresh, cfg)
+    except Exception as e:  # noqa: BLE001
+        print(f"[alerts] evaluation failed: {e}", flush=True)
+        with STATE["lock"]:
+            return list(STATE["alerts"] or [])
+
+
 def refresh_status(force=False, cfg=None):
     """Collect fleet status; serve from cache unless forced or stale.
 
     Collection runs OUTSIDE the lock (copy-on-write): the slow ssh probes never
     block concurrent /api/status readers, and a forced refresh while a background
     collection is already running simply returns the last known snapshot.
+
+    `collecting` is cleared in an outer `finally`: any failure past the cache
+    check (collection, annotation, alert evaluation) used to leave it set, which
+    wedged every later refresh on the cache forever.
     """
     cfg = cfg or collector.load_config()
     ttl = cfg["server"]["cache_ttl_seconds"]
@@ -100,33 +119,36 @@ def refresh_status(force=False, cfg=None):
             return STATE["status"]  # a collection is already in flight
         STATE["collecting"] = True
 
-    fresh = None
     try:
-        fresh = collector.collect(cfg)
-    except Exception as e:  # noqa: BLE001
-        print(f"[collector] {e}", flush=True)
-
-    if fresh is not None:
-        # Annotate (fast, outside the swap) then persist metrics + alerts.
+        fresh = None
         try:
-            fresh["home_internet"] = home_internet.update(fresh, cfg)
+            fresh = collector.collect(cfg)
         except Exception as e:  # noqa: BLE001
-            print(f"[home_internet] {e}", flush=True)
-        active = alerts.evaluate(fresh, cfg)
-        fresh["summary"] = _summarize(fresh, active)
-        fresh["alerts"] = active
+            print(f"[collector] {e}", flush=True)
+
+        if fresh is not None:
+            # Annotate (fast, outside the swap) then persist metrics + alerts.
+            try:
+                fresh["home_internet"] = home_internet.update(fresh, cfg)
+            except Exception as e:  # noqa: BLE001
+                print(f"[home_internet] {e}", flush=True)
+            active = _evaluate_alerts(fresh, cfg)
+            fresh["summary"] = _summarize(fresh, active)
+            fresh["alerts"] = active
+            with STATE["lock"]:
+                STATE["status"] = fresh
+                STATE["last_full"] = time.time()
+                STATE["alerts"] = active
+            try:
+                metrics.record(fresh, cfg)
+            except Exception as e:  # noqa: BLE001
+                print(f"[metrics] {e}", flush=True)
+
         with STATE["lock"]:
-            STATE["status"] = fresh
-            STATE["last_full"] = time.time()
-            STATE["alerts"] = active
-        try:
-            metrics.record(fresh, cfg)
-        except Exception as e:  # noqa: BLE001
-            print(f"[metrics] {e}", flush=True)
-
-    with STATE["lock"]:
-        STATE["collecting"] = False
-        return STATE["status"]
+            return STATE["status"]
+    finally:
+        with STATE["lock"]:
+            STATE["collecting"] = False
 
 
 def health():
@@ -154,6 +176,14 @@ class Handler(BaseHTTPRequestHandler):
     _PROTECTED = {"/api/control", "/api/exec", "/api/audit", "/api/logs"}
 
     # -- helpers -------------------------------------------------------------
+    @staticmethod
+    def _host_facts(host):
+        """Live facts for `host` from the cached snapshot, or {} when unknown."""
+        status = STATE["status"] if isinstance(STATE["status"], dict) else {}
+        hosts = status.get("hosts")
+        h = hosts.get(host) if isinstance(hosts, dict) else None
+        return h if isinstance(h, dict) else {}
+
     def _authorized(self):
         token = (self.server.cfg or {}).get("server", {}).get("auth_token")
         if not token:
@@ -238,18 +268,23 @@ class Handler(BaseHTTPRequestHandler):
             host = q.get("host", "")
             target = q.get("target", "")
             ttype = q.get("type", "unit")
-            status = STATE["status"] or {}
-            h = (status.get("hosts") or {}).get(host, {})
-            # validate target against the live allowlist
-            if ttype == "unit" and h.get("services"):
-                names = {u["name"] for u in h["services"]}
-                if target not in names:
-                    return self._send(400, {"ok": False, "error": f"unit not in live allowlist: {target}"})
-            elif ttype == "container" and h.get("docker"):
-                names = {c["name"] for c in h["docker"]}
-                if target not in names:
-                    return self._send(400, {"ok": False, "error": f"container not in live allowlist: {target}"})
-            res = control.fetch_logs(host, ttype, target, tail=int(q.get("tail", 120)))
+            try:
+                tail = int(q.get("tail", 120))
+            except (TypeError, ValueError):
+                return self._send(400, {"ok": False, "error": f"tail must be an integer: {q.get('tail')!r}"})
+            # The live allowlist is the only permit, and it is checked
+            # unconditionally: a host that reports no units/containers allows
+            # nothing, rather than falling through to control.fetch_logs.
+            h = self._host_facts(host)
+            if ttype == "unit":
+                allowed = {u.get("name") for u in (h.get("services") or []) if isinstance(u, dict)}
+            elif ttype == "container":
+                allowed = {c.get("name") for c in (h.get("docker") or []) if isinstance(c, dict)}
+            else:
+                return self._send(400, {"ok": False, "error": "type must be 'unit' or 'container'"})
+            if target not in allowed:
+                return self._send(400, {"ok": False, "error": f"{ttype} not in live allowlist: {target}"})
+            res = control.fetch_logs(host, ttype, target, tail=tail)
             return self._send(200, res)
         if path == "/api/audit":
             if not self._require_auth(path):
@@ -261,36 +296,37 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if not self._require_auth(path):
             return
-        if path == "/api/control":
+        if path in ("/api/control", "/api/exec"):
             try:
                 length = int(self.headers.get("Content-Length", 0))
                 payload = json.loads(self.rfile.read(length) or b"{}")
             except (ValueError, json.JSONDecodeError):
                 return self._send(400, {"ok": False, "error": "bad json body"})
+            if not isinstance(payload, dict):
+                return self._send(400, {"ok": False, "error": "json object body required"})
+        if path == "/api/control":
             host = payload.get("host")
             action_id = payload.get("action_id")
-            if not host or not action_id:
+            if not (isinstance(host, str) and host and isinstance(action_id, str) and action_id):
                 return self._send(400, {"ok": False, "error": "host and action_id required"})
             cfg = collector.load_config()
             return self._send(200, control.run_action(host, action_id, cfg=cfg))
         if path == "/api/exec":
-            try:
-                length = int(self.headers.get("Content-Length", 0))
-                payload = json.loads(self.rfile.read(length) or b"{}")
-            except (ValueError, json.JSONDecodeError):
-                return self._send(400, {"ok": False, "error": "bad json body"})
             host = payload.get("host")
             exec_id = payload.get("exec_id")
             arg = payload.get("arg", "")
-            if not host or not exec_id:
+            if not (isinstance(host, str) and host and isinstance(exec_id, str) and exec_id):
                 return self._send(400, {"ok": False, "error": "host and exec_id required"})
-            status = STATE["status"] or {}
-            h = (status.get("hosts") or {}).get(host, {})
+            if arg is None:
+                arg = ""
+            if not isinstance(arg, str):
+                return self._send(400, {"ok": False, "error": "arg must be a string"})
+            h = self._host_facts(host)
             cfg = collector.load_config()
             return self._send(200, control.run_exec(
                 host, exec_id, arg=arg, cfg=cfg,
-                allowed_units={u["name"] for u in (h.get("services") or [])},
-                allowed_containers={c["name"] for c in (h.get("docker") or [])},
+                allowed_units={u.get("name") for u in (h.get("services") or []) if isinstance(u, dict)},
+                allowed_containers={c.get("name") for c in (h.get("docker") or []) if isinstance(c, dict)},
             ))
         return self._send(404, {"error": f"no route: {path}"})
 

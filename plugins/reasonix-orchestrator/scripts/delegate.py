@@ -10,7 +10,7 @@ import time
 from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'mcp'))
 from reasonix_engine import run_task, probe, failure_envelope, WORKER_MODELS
-from reasonix_verification import snapshot, verify
+from reasonix_verification import expected_files, snapshot, verify
 from reasonix_process import ProcessFailure
 
 
@@ -63,6 +63,8 @@ def main(argv=None):
                 raise ValueError('Choose --task or --task-file, not both')
             prompt = args.task if args.task is not None else (
                 sys.stdin.read() if args.task_file in (None, '-') else Path(args.task_file).read_text())
+            # Trim before validating: a whitespace-only entry authorizes no path.
+            args.files = ','.join(expected_files(args.files)) or None
             if args.read_only and (args.verify or args.files):
                 raise ValueError('Read mode cannot run write verification commands or file-change checks')
             config = SimpleNamespace(mode='read' if args.read_only else 'write',
@@ -71,10 +73,17 @@ def main(argv=None):
                 timeout_seconds=args.timeout, task_id=args.task_id, escalation_reason=args.escalation_reason,
                 reasonix_bin=os.environ.get('DELEGATE_REASONIX_BIN', 'reasonix'))
             root = str(Path(args.dir).resolve())
-            # Snapshot only for authorized write verification; no Git precondition or mutation.
-            before = snapshot(root) if args.files and args.authorize_writes and not args.read_only else None
-            adjudicator = (lambda payload, remaining: verify(payload, args, before, remaining)) if args.verify or before is not None else None
-            output, code = run_task(config, prompt, adjudicator=adjudicator)
+            # Snapshot only for authorized write verification; no Git precondition or
+            # mutation. The initial snapshot runs inside the objective lock via
+            # prepare, before any worker launch.
+            before = {}
+
+            def prepare():
+                before['snapshot'] = snapshot(root)
+
+            adjudicator = (lambda payload, remaining: verify(payload, args, before.get('snapshot'), remaining)) if args.verify or args.files else None
+            output, code = run_task(config, prompt, adjudicator=adjudicator,
+                                    prepare=prepare if args.files else None)
             if not output.get('ok') and code == 0:
                 code = 1
             output['status'] = 'success' if output.get('ok') else output.get('outcome', 'failed')

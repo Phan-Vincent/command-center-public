@@ -27,11 +27,23 @@ AUDIT_PATH = BASE / "audit.jsonl"
 MAX_AUDIT_BYTES = 1_000_000
 
 # Redact obvious secrets before they hit the audit log (over-redaction is safer).
+# Order matters: whole-secret rules must run before the generic `key=value` one,
+# which would otherwise leave a bearer token or a PEM body in place.
 REDACT_PATTERNS = [
+    # A PEM private key's body is the secret: drop the whole block, including an
+    # unterminated one (a truncated log line must not leak the key material).
+    (re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)",
+                re.S), "[REDACTED KEY]"),
+    # "Authorization: Bearer <token>" — the generic rule below only eats "Bearer".
+    (re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._~+/=\-]{4,}"), r"\1 [REDACTED]"),
     (re.compile(r"(?i)(token|secret|password|passwd|api[_-]?key|apikey|authorization|bearer)\s*[:=]\s*\S+"), r"\1=[REDACTED]"),
-    (re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"), "[REDACTED KEY]"),
     (re.compile(r"\b[A-Za-z0-9_-]{32,}\b"), "[REDACTED]"),
 ]
+
+# Names accepted for a live unit/container target. Leading hyphens are rejected
+# separately: they would be parsed as options by journalctl/docker.
+_UNIT_NAME = re.compile(r"[A-Za-z0-9@._:\-]+")
+_CONTAINER_NAME = re.compile(r"[A-Za-z0-9_.\-]+")
 
 # One lock per host so two clicks can't double-restart the same service.
 _LOCK_GUARD = threading.Lock()
@@ -99,6 +111,17 @@ def _redact(s):
     return s
 
 
+def _valid_target(pattern, value):
+    """True for a plausible unit/container name.
+
+    Rejects a leading hyphen so a target can never be read as an option by
+    journalctl/docker. Colons, `@` and dots are legitimate in unit names, so
+    names such as `unit:fixture@12:34.service` stay usable.
+    """
+    return (isinstance(value, str) and bool(value)
+            and not value.startswith("-") and pattern.fullmatch(value) is not None)
+
+
 def _redact_entry(entry):
     out = dict(entry)
     for k in ("cmd", "stdout", "stderr", "label"):
@@ -121,19 +144,23 @@ def audit(entry, path=AUDIT_PATH, max_bytes=MAX_AUDIT_BYTES):
 
 
 def read_audit(limit=50, path=AUDIT_PATH):
+    """Newest audit entries, reading the rotated file first then the current one."""
+    path = Path(path)
     entries = []
-    try:
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    try:
-                        entries.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        continue
-    except FileNotFoundError:
-        return []
-    return entries[-limit:]
+    for source in (path.with_name(path.name + ".1"), path):
+        try:
+            with open(source) as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            entries.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            continue
+        except FileNotFoundError:
+            continue
+    # The limit applies after the merge, so it always returns the newest entries.
+    return entries[-limit:] if limit else entries
 
 
 def run_action(host_key, action_id, cfg=None, timeout=None):
@@ -217,13 +244,13 @@ def run_exec(host_key, exec_id, arg="", cfg=None, timeout=None,
     cmd = ex["cmd"]
     atype = ex.get("arg", "none")
     if atype == "unit":
-        if not arg or not re.fullmatch(r"[A-Za-z0-9@._:\-]+", arg):
+        if not _valid_target(_UNIT_NAME, arg):
             return {"ok": False, "error": "invalid unit name"}
         if allowed_units is not None and arg not in allowed_units:
             return {"ok": False, "error": f"unit not in live allowlist: {arg}"}
         cmd = cmd.replace("{arg}", arg)
     elif atype == "container":
-        if not arg or not re.fullmatch(r"[A-Za-z0-9_.\-]+", arg):
+        if not _valid_target(_CONTAINER_NAME, arg):
             return {"ok": False, "error": "invalid container name"}
         if allowed_containers is not None and arg not in allowed_containers:
             return {"ok": False, "error": f"container not in live allowlist: {arg}"}
@@ -266,13 +293,16 @@ def fetch_logs(host_key, target_type, target, tail=120, cfg=None, timeout=15):
     host_cfg = cfg["hosts"].get(host_key)
     if not host_cfg:
         return {"ok": False, "error": f"unknown host: {host_key}"}
-    tail = max(1, min(int(tail), 500))
+    try:
+        tail = max(1, min(int(tail), 500))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "tail must be an integer"}
     if target_type == "unit":
-        if not re.fullmatch(r"[A-Za-z0-9@._:\-]+", target):
+        if not _valid_target(_UNIT_NAME, target):
             return {"ok": False, "error": "invalid unit name"}
         cmd = f"journalctl --user -u {target} -n {tail} --no-pager"
     elif target_type == "container":
-        if not re.fullmatch(r"[A-Za-z0-9_.\-]+", target):
+        if not _valid_target(_CONTAINER_NAME, target):
             return {"ok": False, "error": "invalid container name"}
         cmd = f"docker logs {target} --tail {tail} 2>&1"
     else:

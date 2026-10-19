@@ -20,6 +20,11 @@ def _summary(text: str, limit: int = 700) -> str:
     return compact[:limit] + ("…" if len(compact) > limit else "")
 
 
+# Engine codes for a worker that could not start: a missing prerequisite, not
+# something a retry fixes.
+UNAVAILABLE_CODES = frozenset({"EXECUTABLE_MISSING", "LAUNCH_FAILURE"})
+
+
 def classify_reasonix_failure(message: str, structured: Any = None) -> dict[str, Any]:
     """Classify a Reasonix failure, preferring trusted structured fields."""
     data = structured if isinstance(structured, dict) else {}
@@ -31,30 +36,37 @@ def classify_reasonix_failure(message: str, structured: Any = None) -> dict[str,
         if not isinstance(retryable, bool):
             retryable = category in {"transient", "timeout"}
         return worker_error(category, message, code=str(code) if code else None, retryable=retryable)
+    # The engine's canonical identity: `failure.code`, else the flat `error_code`.
+    # It names the failure but never makes it retryable on its own.
+    failure = data.get("failure") if isinstance(data.get("failure"), dict) else {}
+    canonical = code or failure.get("code") or data.get("error_code")
+    canonical = str(canonical)[:128] if canonical else None
+    if canonical in UNAVAILABLE_CODES:
+        return worker_error("worker_unavailable", message, code=canonical, retryable=False)
 
     text = " ".join(
         str(value) for value in (message, code, data.get("stderr"), data.get("parse_error")) if value
     ).lower()
     http_match = next((value for value in ("429", "500", "502", "503", "504") if re.search(rf"\b(?:http[ _-]?)?{value}\b", text)), None)
     if http_match:
-        return worker_error("transient", message, code=f"HTTP_{http_match}", retryable=True)
+        return worker_error("transient", message, code=canonical or f"HTTP_{http_match}", retryable=True)
     if any(phrase in text for phrase in (
         "connection reset", "connection timeout", "read timeout", "temporary network failure",
         "upstream unavailable", "temporarily unavailable",
     )):
-        return worker_error("transient", message, code="NETWORK_TRANSIENT", retryable=True)
+        return worker_error("transient", message, code=canonical or "NETWORK_TRANSIENT", retryable=True)
     if "timed out" in text or "timeout" in text:
-        return worker_error("timeout", message, code="TIMEOUT", retryable=True)
+        return worker_error("timeout", message, code=canonical or "TIMEOUT", retryable=True)
     if any(phrase in text for phrase in ("cancelled", "canceled", "explicit cancellation")):
-        return worker_error("cancelled", message, code="CANCELLED", retryable=False)
+        return worker_error("cancelled", message, code=canonical or "CANCELLED", retryable=False)
     if any(phrase in text for phrase in (
         "authentication failure", "invalid api key", "unauthorized", "permission denied",
         "invalid model", "forbidden",
     )):
-        return worker_error("permanent", message, code="AUTH_OR_PERMISSION", retryable=False)
+        return worker_error("permanent", message, code=canonical or "AUTH_OR_PERMISSION", retryable=False)
     if any(phrase in text for phrase in ("malformed task", "unsupported request", "invalid request")):
-        return worker_error("invalid_input", message, code="INVALID_INPUT", retryable=False)
-    return worker_error("unknown", message, code=str(code) if code else None, retryable=False)
+        return worker_error("invalid_input", message, code=canonical or "INVALID_INPUT", retryable=False)
+    return worker_error("unknown", message, code=canonical, retryable=False)
 
 
 class ReasonixAdapter:

@@ -6,8 +6,12 @@ Notification lifecycle (per alert key = host|rule|subject, per webhook):
   * never re-send while it stays active, including across server restarts
     (state persists to `notify.state_file`);
   * once it has been gone for `min_active_seconds`, send one RESOLVED message
-    to every webhook that was told it fired. Alerts on an unreachable host are
-    held rather than resolved, since their facts can't be confirmed;
+    to every webhook that was told it fired. Alerts whose facts can't be
+    confirmed — the host is unreachable, or the snapshot is a stale
+    last-known-good copy — are held rather than resolved, and their recovery
+    debounce restarts once real facts are back;
+  * rules that read collected facts are only evaluated while those facts are
+    current: an unreachable or stale host is `host`'s business alone;
   * failed sends are retried on later evaluations, after a short per-webhook
     backoff.
 
@@ -55,6 +59,57 @@ def _now_iso():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def _facts_unknown(h):
+    """True when a host's facts can neither confirm nor deny anything right now.
+
+    Covers both an unreachable host and the last-known-good copy a failed
+    collection leaves behind (`stale`). Every rule derived from a host's facts
+    must be held in that state, and recoveries can't be observed in it.
+    """
+    return not isinstance(h, dict) or not h.get("reachable") or bool(h.get("stale"))
+
+
+def _str_list(value):
+    return [v for v in value if isinstance(v, str)] if isinstance(value, list) else []
+
+
+def _clean_active(raw):
+    """Normalize persisted active alerts; drop anything unusable."""
+    out = {}
+    items = raw.items() if isinstance(raw, dict) else ()
+    for key, entry in items:
+        if not isinstance(entry, dict):
+            continue
+        alert = entry.get("alert")
+        first_seen = _num(entry.get("first_seen"))
+        if not isinstance(alert, dict) or not isinstance(alert.get("host"), str) or first_seen is None:
+            continue
+        clean = {"alert": dict(alert), "first_seen": first_seen,
+                 "notified": _str_list(entry.get("notified"))}
+        missing_since = _num(entry.get("missing_since"))
+        if missing_since is not None:
+            clean["missing_since"] = missing_since
+        out[str(key)] = clean
+    return out
+
+
+def _clean_resolved(raw):
+    """Normalize persisted pending recoveries; drop anything unusable."""
+    out = {}
+    items = raw.items() if isinstance(raw, dict) else ()
+    for key, entry in items:
+        if not isinstance(entry, dict):
+            continue
+        alert = entry.get("alert")
+        resolved_at = _num(entry.get("resolved_at"))
+        if not isinstance(alert, dict) or not isinstance(alert.get("host"), str) or resolved_at is None:
+            continue
+        out[str(key)] = {"alert": dict(alert), "first_seen": _num(entry.get("first_seen")),
+                         "resolved_at": resolved_at,
+                         "pending": _str_list(entry.get("pending"))}
+    return out
+
+
 def _age_seconds(value):
     try:
         parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
@@ -67,12 +122,19 @@ def _age_seconds(value):
 
 def _evaluate_host(host, h, rules):
     alerts = []
+    h = h if isinstance(h, dict) else {}
+    # Only `host` is judged from the connection attempt itself. Everything else
+    # reads collected facts, which are last-known-good copies (`stale`) whenever
+    # a collection failed — evaluating those repeats an old incident forever.
+    facts_known = not _facts_unknown(h)
     for rule in rules:
         if rule.get("hosts") is not None and host not in rule["hosts"]:
             continue
         t = rule.get("type")
         sev = rule.get("severity", "warning")
         first = len(alerts)
+        if t != "host" and not facts_known:
+            continue
         if t == "host":
             if rule.get("state") == "unreachable" and not h.get("reachable"):
                 alerts.append({"host": host, "rule": rule.get("id", "host-down"),
@@ -205,8 +267,10 @@ def _load(path):
     try:
         raw = path.read_text(encoding="utf-8")
         data = json.loads(raw)
-        _STATE.update(data.get("active") or {})
-        _RESOLVED.update(data.get("resolved") or {})
+        if not isinstance(data, dict):
+            raise ValueError("alert state must be a JSON object")
+        _STATE.update(_clean_active(data.get("active")))
+        _RESOLVED.update(_clean_resolved(data.get("resolved")))
         _LOADED["saved"] = raw
     except (OSError, ValueError):
         pass  # first run or unreadable: start clean
@@ -237,7 +301,9 @@ def evaluate(status, cfg, now=None):
     debounce = _num(notify_cfg.get("min_active_seconds", 0)) or 0
     max_gap = _num(notify_cfg.get("max_sample_gap_seconds", DEFAULT_MAX_SAMPLE_GAP_SECONDS))
     now = time.time() if now is None else now
-    hosts = status.get("hosts", {})
+    hosts = status.get("hosts") if isinstance(status, dict) else None
+    if not isinstance(hosts, dict):
+        hosts = {}
     raw = []
     for host, h in hosts.items():
         raw.extend(_evaluate_host(host, h, rules))
@@ -270,8 +336,12 @@ def evaluate(status, cfg, now=None):
                 del _STATE[key]  # never announced, so nothing to resolve
                 continue
             alert = entry["alert"]
-            if alert.get("type") != "host" and hosts.get(alert["host"], {}).get("reachable") is False:
-                continue  # can't confirm recovery while the host is unreachable
+            if alert.get("type") != "host" and _facts_unknown(hosts.get(alert.get("host"))):
+                # Can't confirm recovery while the host is unreachable or showing
+                # last-known-good facts: hold the alert and restart the recovery
+                # debounce from the next sample that can actually observe it.
+                entry.pop("missing_since", None)
+                continue
             entry.setdefault("missing_since", now)
             if now - entry["missing_since"] < debounce:
                 continue

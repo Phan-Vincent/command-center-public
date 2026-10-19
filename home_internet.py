@@ -68,14 +68,81 @@ def _state_path(settings):
     return path if path.is_absolute() else BASE / path
 
 
+def _number(value):
+    """A real number, or None. Booleans are not numbers here."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value
+
+
+def _as_list(value):
+    return value if isinstance(value, list) else []
+
+
+def _outage(value):
+    """One normalized outage record, or None if the shape can't be trusted."""
+    if not isinstance(value, dict):
+        return None
+    start, end, seconds = (_number(value.get(k)) for k in ("start", "end", "seconds"))
+    if start is None or end is None or seconds is None:
+        return None
+    out = {"start": start, "end": end, "seconds": seconds,
+           "confirmed": bool(value.get("confirmed"))}
+    if isinstance(value.get("where"), str):
+        out["where"] = value["where"]
+    samples = value.get("where_samples")
+    if isinstance(samples, dict):
+        counts = {k: int(v) for k, v in samples.items() if _number(v) is not None}
+        if counts:
+            out["where_samples"] = counts
+    return out
+
+
+def _open_outage(value):
+    """The in-progress outage, normalized, or None."""
+    if not isinstance(value, dict):
+        return None
+    start = _number(value.get("start"))
+    if start is None:
+        return None
+    out = {"start": start, "confirmed": bool(value.get("confirmed"))}
+    tally = value.get("where")
+    if isinstance(tally, dict):
+        counts = {k: int(v) for k, v in tally.items() if _number(v) is not None}
+        if counts:
+            out["where"] = counts
+    return out
+
+
+def _restore(raw):
+    """Validate a state file's shape, including its nested records.
+
+    `update` reads these fields directly, so a hand-edited or truncated file
+    (JSON null, an array, a string where a record belongs) must degrade to a
+    clean state instead of raising mid-collection.
+    """
+    data = {"state": None, "since": None, "open": None, "outages": [],
+            "pending": [], "retry_after": 0}
+    if not isinstance(raw, dict):
+        return data
+    state = raw.get("state")
+    data["state"] = state if isinstance(state, str) else None
+    data["since"] = _number(raw.get("since"))
+    data["last_sample"] = _number(raw.get("last_sample"))
+    data["retry_after"] = _number(raw.get("retry_after")) or 0
+    data["open"] = _open_outage(raw.get("open"))
+    data["outages"] = [o for o in map(_outage, _as_list(raw.get("outages"))) if o]
+    data["pending"] = [o for o in map(_outage, _as_list(raw.get("pending"))) if o]
+    return data
+
+
 def _load(path):
     if path is not None:
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            return _restore(json.loads(path.read_text(encoding="utf-8")))
         except (OSError, ValueError):
             pass  # first run or unreadable: start clean
-    return {"state": None, "since": None, "open": None, "outages": [],
-            "pending": [], "retry_after": 0}
+    return _restore(None)
 
 
 def _save(path, data):

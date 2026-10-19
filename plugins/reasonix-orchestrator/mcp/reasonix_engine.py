@@ -260,7 +260,7 @@ def decorate(payload, args, task_id, ledger=None):
     return payload
 
 
-def run_task(args, prompt, runner=run_process, ledger_root=None, adjudicator=None):
+def run_task(args, prompt, runner=run_process, ledger_root=None, adjudicator=None, prepare=None):
     task_id = getattr(args, 'task_id', None) or str(uuid.uuid4())
     session = None
     try:
@@ -270,6 +270,19 @@ def run_task(args, prompt, runner=run_process, ledger_root=None, adjudicator=Non
         # timeout_seconds is worker budget; reserve finite cleanup within the
         # persisted objective deadline. Follow-up timeout values never extend it.
         with store.locked(task_id, identity, args.timeout_seconds + CLEANUP_SECONDS) as session:
+            # An authorized pre-run snapshot belongs inside the objective lock and
+            # before the reservation: failing here must prevent launch, must not
+            # strand an active attempt, and must not reserve budget for a worker
+            # that never ran. The callback may stash its own result.
+            if prepare is not None:
+                try:
+                    prepare()
+                except (ValueError, OSError) as exc:
+                    payload = {'schema_version': SCHEMA_VERSION, 'ok': False, 'error_code': 'SCOPE_CHECK_FAILED',
+                               'error': 'Initial scope snapshot failed: ' + str(exc)[:1000], 'stage': 'scope',
+                               'failure_class': 'blocked', 'exit_code': 2, 'changes': [],
+                               'verification': {'status': 'not_run', 'checks': []}}
+                    return decorate(payload, args, task_id, session.snapshot()), 2
             session.before_launch(tier, reason, hashlib.sha256(prompt.encode()).hexdigest())
             budget = session.remaining() - CLEANUP_SECONDS
             if budget <= 0:
