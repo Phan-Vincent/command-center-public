@@ -210,10 +210,29 @@ def systemd_units():
     return units
 
 
+# acer publishes container states as root, so its user needs no docker group (homelab-ansible,
+# security baseline F8). Older than this, the panel shows "unavailable" rather than stale data.
+CONTAINER_STATUS_PATH = "/run/homelab/container-status.json"
+CONTAINER_STATUS_MAX_AGE = 15 * 60
+
+
+def published_containers():
+    """Containers from homelab-container-status, or None when absent, stale or malformed."""
+    try:
+        with open(CONTAINER_STATUS_PATH) as f:
+            doc = json.load(f)
+        if time.time() - doc["generated_at"] > CONTAINER_STATUS_MAX_AGE:
+            return None
+        return [{"name": c["name"], "image": c.get("image", ""), "status": c.get("status", ""),
+                 "ports": c.get("ports", "")} for c in doc["containers"]]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def docker_containers():
     out = sh("docker ps -a --format '{{.Names}}|{{.Image}}|{{.Status}}|{{.Ports}}' 2>/dev/null")
     if not out or "<err:" in out or "permission denied" in out.lower():
-        return None  # docker absent or not usable by this user
+        return published_containers()  # docker absent or not usable by this user
     conts = []
     for line in out.splitlines():
         parts = line.split("|", 3)

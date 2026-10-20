@@ -153,6 +153,42 @@ class CollectorTests(unittest.TestCase):
             self.assertIn(field, facts)
 
 
+class PublishedContainerTests(unittest.TestCase):
+    """acer's container panel without the docker group (homelab-ansible security baseline F8)."""
+
+    def setUp(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.path = Path(d.name) / "container-status.json"
+        self.old = probe.CONTAINER_STATUS_PATH
+        probe.CONTAINER_STATUS_PATH = str(self.path)
+        self.addCleanup(setattr, probe, "CONTAINER_STATUS_PATH", self.old)
+        self.sh = probe.sh
+        probe.sh = lambda *a, **k: ""  # docker unusable by this user
+        self.addCleanup(setattr, probe, "sh", self.sh)
+
+    def write(self, age):
+        self.path.write_text(json.dumps({"schema": 1, "generated_at": int(time.time() - age), "containers": [
+            {"name": "pihole", "image": "pihole/pihole", "state": "running", "status": "Up 2 days (healthy)",
+             "ports": "53/udp", "health": "healthy"}]}))
+
+    def test_fresh_status_file_fills_the_panel(self):
+        self.write(60)
+        self.assertEqual(probe.docker_containers(), [
+            {"name": "pihole", "image": "pihole/pihole", "status": "Up 2 days (healthy)", "ports": "53/udp"}])
+
+    def test_stale_missing_or_malformed_file_is_unavailable(self):
+        self.assertIsNone(probe.docker_containers())
+        self.write(16 * 60)
+        self.assertIsNone(probe.docker_containers())
+        self.path.write_text("not json")
+        self.assertIsNone(probe.docker_containers())
+
+    def test_acer_has_no_docker_logs_action(self):
+        actions = json.loads((BASE / "config.json").read_text())["hosts"]["acer"].get("exec", [])
+        self.assertFalse([a for a in actions if "docker" in a.get("cmd", "")])
+
+
 class PokemonHealthTests(unittest.TestCase):
     def tearDown(self):
         alerts.reset_state()
