@@ -91,6 +91,15 @@ class CompatibilityTests(unittest.TestCase):
         self.assertEqual(self.recorded(), [])
         self.assert_no_git_mutation()
 
+    def test_blank_files_rejected_without_launch(self):
+        for files in (' , ', ' ', ''):
+            code, result = self.run_task([{'write': {'new.txt': 'no'}}], '--authorize-writes', '--files', files)
+            self.assertEqual((code, result['outcome']), (2, 'blocked'), result)
+            self.assertIn('--files must name at least one path', result['error'])
+        self.assertEqual(self.recorded(), [])
+        self.assertFalse((self.repo/'new.txt').exists())
+        self.assert_no_git_mutation()
+
     def test_failure_retains_changes_without_reset_or_stash_or_retry(self):
         code, result = self.run_task([{'is_error': True, 'write': {'partial.txt': 'retained'},
                                       'error_code': 'TASK_FAILED'}], '--authorize-writes')

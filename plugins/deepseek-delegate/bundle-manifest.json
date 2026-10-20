@@ -3,7 +3,7 @@
   "mcp/reasonix_ledger.py": "106617eaa66bc7a6b921dd0952e06ad9dabe6d34e95d4322c7d788bccfbf9ad3",
   "mcp/reasonix_process.py": "53e39c73b033a40ab4b382fd0177d7374e72eca35c1a74d1fbe91a31c920e909",
   "mcp/reasonix_verification.py": "db300ea10c9ef01e554b68712135862c5b7695005b8023538f4123771935dda2",
-  "scripts/delegate.py": "0643bb12ea1624a407f9bcb7a7880b024b061ad19f1cb24028f49c019082741c",
+  "scripts/delegate.py": "1ad7597316aa97425c107526097632518b48bde526bc9adfdd1828f499680c28",
   "skills/deepseek-delegation/SKILL.md": "81e8dc00db06aa6437564e4d633ba0378112511db670e70e79ab82142781f032",
   "skills/reasonix-orchestrator/SKILL.md": "673299aa6b07a13f5bfcae0d5976d37ccc7dde1d02763af224be672d4f320d32",
   "skills/reasonix-orchestrator/agents/openai.yaml": "4499d9c69260de4aed819c76227ad895ff09981f901f6ba9f060e0db587ed631",

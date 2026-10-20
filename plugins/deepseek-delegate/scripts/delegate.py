@@ -63,8 +63,12 @@ def main(argv=None):
                 raise ValueError('Choose --task or --task-file, not both')
             prompt = args.task if args.task is not None else (
                 sys.stdin.read() if args.task_file in (None, '-') else Path(args.task_file).read_text())
-            # Trim before validating: a whitespace-only entry authorizes no path.
-            args.files = ','.join(expected_files(args.files)) or None
+            # Trim before validating: a whitespace-only entry authorizes no path, and
+            # an explicit --files that names none is rejected rather than dropped.
+            if args.files is not None:
+                args.files = ','.join(expected_files(args.files))
+                if not args.files:
+                    raise ValueError('--files must name at least one path')
             if args.read_only and (args.verify or args.files):
                 raise ValueError('Read mode cannot run write verification commands or file-change checks')
             config = SimpleNamespace(mode='read' if args.read_only else 'write',
