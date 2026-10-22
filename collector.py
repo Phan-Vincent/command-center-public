@@ -20,6 +20,7 @@ import concurrent.futures
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -204,16 +205,122 @@ def _git_info(path):
     return {"branch": branch, "commit": short, "dirty": len(dirty.splitlines())}
 
 
+TAILSCALE_APP = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+
+
+def _tailscale_cli():
+    """The Tailscale CLI to use: PATH first, then the macOS app bundle."""
+    return "tailscale" if shutil.which("tailscale") else TAILSCALE_APP
+
+
 def _tailscale_ip():
-    out = _sh(["tailscale", "ip", "-4"])
+    out = _sh([_tailscale_cli(), "ip", "-4"])
     if re.match(r"^[\d.]+$", out.strip()):
         return out.strip()
-    app = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
-    if os.path.exists(app):
-        out = _sh([app, "ip", "-4"])
-        if re.match(r"^[\d.]+$", out.strip()):
-            return out.strip()
     return None
+
+
+def _tailscale_json(args):
+    """Run one read-only Tailscale JSON command; return (object|None, error|None)."""
+    label = " ".join(args)
+    try:
+        out = _sh([_tailscale_cli()] + list(args), timeout=10)
+    except Exception as e:  # noqa: BLE001 - collection must survive a broken CLI
+        return None, f"tailscale {label} failed: {type(e).__name__}: {e}"
+    if not isinstance(out, str) or not out.strip():
+        return None, f"tailscale {label} failed"
+    try:
+        data = json.loads(out)
+    except (TypeError, ValueError):
+        return None, f"tailscale {label} returned invalid JSON"
+    if not isinstance(data, dict):
+        return None, f"tailscale {label} returned invalid JSON"
+    return data, None
+
+
+def _locked_out_names(filtered):
+    if isinstance(filtered, dict):
+        peers = filtered.values()
+    elif isinstance(filtered, list):
+        peers = filtered
+    else:
+        return []
+    names = []
+    for peer in peers:
+        if not isinstance(peer, dict):
+            continue
+        for key in ("Name", "HostName", "StableID", "NodeKey"):
+            value = peer.get(key)
+            if isinstance(value, str) and value:
+                names.append(value[:16] if key == "NodeKey" else value)
+                break
+    return names
+
+
+def _tailnet_device(node, is_self):
+    expiry = node.get("KeyExpiry")
+    if not isinstance(expiry, str) or not expiry or expiry.startswith("0001-01-01"):
+        expiry = None
+    name = node.get("HostName")
+    return {
+        "name": name if isinstance(name, str) else None,
+        "self": bool(is_self),
+        "tagged": bool(node.get("Tags")),
+        "key_expiry": expiry,
+    }
+
+
+def _tailnet_devices(status):
+    devices = []
+    self_node = status.get("Self")
+    if isinstance(self_node, dict):
+        devices.append(_tailnet_device(self_node, True))
+    peers = status.get("Peer")
+    if isinstance(peers, dict):
+        peers = peers.values()
+    elif not isinstance(peers, (list, tuple)):
+        peers = ()
+    for peer in peers:
+        if isinstance(peer, dict):
+            devices.append(_tailnet_device(peer, False))
+    return devices
+
+
+def _tailnet():
+    """Tailnet Lock and key-expiry facts from the local Tailscale CLI.
+
+    The two commands are independent: a failure in one leaves the other's
+    readable parts intact and is reported in `error`. Never raises.
+    """
+    out = {"lock_enabled": None, "self_signed": None, "locked_out": [],
+           "devices": [], "error": None}
+    errors = []
+
+    status, err = _tailscale_json(["status", "--json"])
+    if err:
+        errors.append(err)
+    if status is not None:
+        out["devices"] = _tailnet_devices(status)
+    # A stopped or logged-out client can't vouch for the tailnet's lock state, so
+    # lock facts count only while it runs (else "lock is off" would be a false alarm).
+    running = status is not None and status.get("BackendState") == "Running"
+    if status is not None and not running:
+        errors.append(f"tailscale is {status.get('BackendState') or 'not running'}")
+
+    lock, err = _tailscale_json(["lock", "status", "--json"])
+    if err:
+        errors.append(err)
+    if lock is not None and running:
+        enabled = lock.get("Enabled")
+        if isinstance(enabled, bool):
+            out["lock_enabled"] = enabled
+            if enabled:
+                signed = lock.get("NodeKeySigned")
+                out["self_signed"] = signed if isinstance(signed, bool) else None
+                out["locked_out"] = _locked_out_names(lock.get("FilteredPeers"))
+
+    out["error"] = "; ".join(errors) if errors else None
+    return out
 
 
 def collect_local(cfg_host):
@@ -228,6 +335,7 @@ def collect_local(cfg_host):
         "mem": _mem(),
         "disk": _disk(),
         "tailscale_ip": _tailscale_ip() or cfg_host.get("tailscale_ip"),
+        "tailnet": _tailnet(),
         "wan": wan_check(),
         "dns": dns_check(),
         "ports": _ports(),

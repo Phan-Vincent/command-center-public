@@ -120,8 +120,22 @@ def _age_seconds(value):
         return None
 
 
-def _evaluate_host(host, h, rules):
+def _parse_ts(value):
+    """Parse an ISO timestamp (Z and fractions ok) into aware UTC, else None."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _evaluate_host(host, h, rules, now=None):
     alerts = []
+    now = time.time() if now is None else now
     h = h if isinstance(h, dict) else {}
     # Only `host` is judged from the connection attempt itself. Everything else
     # reads collected facts, which are last-known-good copies (`stale`) whenever
@@ -224,6 +238,61 @@ def _evaluate_host(host, h, rules):
                     alerts.append({"host": host, "rule": rule.get("id", "pokemon-service"),
                                    "severity": sev, "subject": component,
                                    "message": f"{host}: Pokémon {component} is {state or 'unknown'}"})
+        elif t == "tailnet_lock":
+            tailnet = h.get("tailnet")
+            if not isinstance(tailnet, dict):
+                continue
+            if rule.get("expect_enabled") is True and tailnet.get("lock_enabled") is False:
+                alerts.append({"host": host, "rule": rule.get("id", "tailnet-lock"),
+                               "severity": sev,
+                               "message": f"{host}: Tailnet Lock is off"})
+        elif t == "tailnet_locked_out":
+            tailnet = h.get("tailnet")
+            if not isinstance(tailnet, dict):
+                continue
+            names = tailnet.get("locked_out")
+            for name in (names if isinstance(names, list) else []):
+                if not isinstance(name, str) or not name:
+                    continue
+                alerts.append({"host": host, "rule": rule.get("id", "tailnet-locked-out"),
+                               "severity": sev, "subject": name,
+                               "message": f"{host}: {name} is locked out of the tailnet "
+                                          f"(needs a Tailnet Lock signature)"})
+            if tailnet.get("self_signed") is False:
+                alerts.append({"host": host, "rule": rule.get("id", "tailnet-locked-out"),
+                               "severity": sev, "subject": host,
+                               "message": f"{host}: {host} is locked out of the tailnet "
+                                          f"(needs a Tailnet Lock signature)"})
+        elif t == "tailnet_key_expiry":
+            tailnet = h.get("tailnet")
+            if not isinstance(tailnet, dict):
+                continue
+            days = _num(rule.get("days", 14))
+            if days is None:
+                days = 14
+            cutoff = now + days * 86400
+            devices = tailnet.get("devices")
+            for device in (devices if isinstance(devices, list) else []):
+                if not isinstance(device, dict):
+                    continue
+                name = device.get("name")
+                if not isinstance(name, str) or not name:
+                    continue
+                raw_expiry = device.get("key_expiry")
+                if isinstance(raw_expiry, str) and raw_expiry.startswith("0001-01-01"):
+                    continue  # Tailscale's zero time means "never expires"
+                expires = _parse_ts(raw_expiry)
+                if expires is None:
+                    continue
+                expires_at = expires.timestamp()
+                if expires_at > cutoff:
+                    continue
+                if expires_at < now:
+                    message = f"{name}'s Tailscale key expired {expires.strftime('%Y-%m-%d')}"
+                else:
+                    message = f"{name}'s Tailscale key expires {expires.strftime('%Y-%m-%d')}"
+                alerts.append({"host": host, "rule": rule.get("id", "tailnet-key-expiry"),
+                               "severity": sev, "subject": name, "message": message})
         for a in alerts[first:]:
             a["type"] = t
     return alerts
@@ -306,7 +375,7 @@ def evaluate(status, cfg, now=None):
         hosts = {}
     raw = []
     for host, h in hosts.items():
-        raw.extend(_evaluate_host(host, h, rules))
+        raw.extend(_evaluate_host(host, h, rules, now))
 
     with _LOCK:  # held across sends: evaluations are serialized, so nothing double-sends
         path = _state_path(notify_cfg)
