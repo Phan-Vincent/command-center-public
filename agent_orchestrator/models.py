@@ -11,6 +11,7 @@ from uuid import uuid4
 SCHEMA_VERSION = 1
 WORKERS = ("external_chatgpt", "reasonix_flash", "reasonix_pro", "codex", "local")
 STATUSES = ("pending", "running", "waiting_for_user", "completed", "failed", "cancelled")
+RESULT_STATUSES = ("completed", "failed", "waiting_for_user", "cancelled")
 PRIORITIES = ("low", "normal", "high", "urgent")
 FAILURE_CATEGORIES = (
     "transient", "permanent", "invalid_input", "worker_unavailable",
@@ -230,7 +231,7 @@ def normalize_result(
 ) -> dict[str, Any]:
     if worker not in WORKERS:
         raise OrchestratorError(f"unknown result worker: {worker}")
-    if status not in ("completed", "failed", "waiting_for_user"):
+    if status not in RESULT_STATUSES:
         raise OrchestratorError(f"invalid result status: {status}")
     result = {
         "schema_version": SCHEMA_VERSION,

@@ -6,7 +6,7 @@ This is a small, filesystem-backed supervisor for delegating bounded work while 
 
 The CLI writes one JSON record per task, one normalized result per attempt, an inspectable context package per dispatch, and an append-only decision log under `data/orchestrator/`. That directory is already covered by this repository's `data/` runtime ignore rule. Set `ORCHESTRATOR_HOME` or pass `--store` to use another location.
 
-Each worker assignment consumes one transition. Automatic retries against the same Reasonix worker are execution attempts inside that transition and do not consume depth. A retryable failure may trigger the bounded Flash → Pro → Codex escalation path while depth remains available. There is no autonomous planning loop.
+Each worker assignment consumes one transition and exactly one worker attempt. There is no automatic retry, backoff, or Flash → Pro → Codex escalation inside a dispatch. A failed attempt is terminal until the supervisor explicitly delegates or retries it, and every continuation reuses the same task/objective ID. Work is refused while a prior Reasonix worker's stop state is unknown or still running. There is no autonomous planning loop.
 
 Workers have deliberately different trust boundaries:
 
@@ -73,7 +73,7 @@ Explicit worker selection still wins. Inspect and record a deterministic explana
 ./orchestrator run TASK_ID --explain
 ```
 
-Every dispatch writes an append-only routing record with the selected worker, timestamp, reasons, requirement snapshot, rule, and potential escalation path under `data/orchestrator/routing/TASK_ID/`.
+Every dispatch writes an append-only routing record with the selected worker, timestamp, reasons, requirement snapshot, rule, and potential explicit follow-up workers under `data/orchestrator/routing/TASK_ID/`.
 
 Use an explicit worker when needed:
 
@@ -83,7 +83,7 @@ Use an explicit worker when needed:
 ./orchestrator retry TASK_ID --worker reasonix_pro
 ```
 
-`delegate` is the explicit way to continue a completed task with another worker. `retry` is limited to failed or waiting tasks. Running and completed tasks are protected from accidental duplicate `run` calls.
+`delegate` is the explicit way to continue a completed task with another worker. `retry` is limited to failed or waiting tasks. Running and completed tasks are protected from accidental duplicate `run` calls. Any continuation is refused while the previous Reasonix worker's stop state is `unknown` or `running`; confirm the worker stopped before recovering.
 
 When a prior route was actually wrong, record that empirical signal rather than treating every valid escalation as a misroute:
 
@@ -95,15 +95,15 @@ When a prior route was actually wrong, record that empirical signal rather than 
 
 The original worker, replacement worker, and reason are preserved and counted in `stats`.
 
-## Transient Reasonix retries
+## Reasonix failure handling and recovery
 
 Reasonix failures include the original message plus structured `category`, `code`, and `retryable` fields. Categories are `transient`, `permanent`, `invalid_input`, `worker_unavailable`, `timeout`, `cancelled`, and `unknown`. Structured provider errors take precedence over text classification.
 
-HTTP 429/500/502/503/504, connection resets/timeouts, read timeouts, temporary network failures, and upstream unavailability can retry. Authentication errors, invalid API keys/models, permission denial, malformed tasks, unsupported requests, and cancellation do not retry.
+HTTP 429/500/502/503/504, connection resets, temporary network failures, and upstream unavailability are classified as transient. Authentication errors, invalid API keys/models, permission denial, malformed tasks, unsupported requests, cancellation, timeouts, missing results, and unknown outcomes are not retryable.
 
-One Reasonix invocation allows at most three execution attempts. Backoff defaults to about one second and two seconds with small jitter and a bounded total budget. Each attempt records its worker, number, start/end timestamps, latency, status, and classified error. The CLI shows a concise retry summary on standard error; the same sequence is preserved in result metadata and append-only events.
+A dispatch performs exactly one MCP `delegate_read` attempt. It sends the task ID as the engine's objective ID and preserves the engine's `outcome` and `process` stop evidence in result metadata. The supervisor never retries, backs off, or escalates automatically, including for transient failures.
 
-After three retryable Flash failures, non-repository work can escalate to Pro. If repository writes or terminal authority are required, it escalates directly to Codex. Exhausted Pro can escalate to Codex. Each escalation consumes normal transition depth and records its reason; same-worker retries do not.
+After a failure, inspect the result and recover explicitly with `retry`, `reroute`, or `delegate`. Recovery reuses the same objective ID. It requires positive stop evidence: a stopped or never-started local process, drained pipes, and no unknown outcome or unresolved process state. Missing evidence in legacy records also blocks recovery. All prior attempts are checked, so a manual completion record or different worker selection cannot conceal an unresolved worker. Evidence that the worker never started (for example a context-packaging failure) permits an explicit retry once the input or storage problem is fixed. The Reasonix engine still enforces its original deadline and continuation limits; passing the local stop check does not grant another engine attempt.
 
 ## One-command workflow
 
@@ -189,9 +189,9 @@ Use `--result-file PATH` to retain a longer local report.
 
 ## State, recovery, and metrics
 
-Task states are `pending`, `running`, `waiting_for_user`, `completed`, `failed`, and `cancelled`. Writes use atomic replacement, events are append-only JSONL, and each attempt keeps its raw worker response. `list`, `status`, `result`, and `context` make state inspectable; `retry` preserves prior attempts.
+Task states are `pending`, `running`, `waiting_for_user`, `completed`, `failed`, and `cancelled`. Writes use atomic replacement, events are append-only JSONL, and each attempt keeps its raw worker response. A context read, packaging, or persistence failure before dispatch is recorded as a failed result with `process.local_status: not_started` and diagnostic metadata; the worker is not launched and the task does not remain `running`. A cancellation always wins: a task cancelled during packaging or while a worker is running keeps the `cancelled` task state and stores a `cancelled` result rather than reporting the worker's late output as completed. `list`, `status`, `result`, and `context` make state inspectable; `retry` preserves prior attempts.
 
-`stats` retains the v1.1 totals and adds observed routing outcomes for initially selected Flash, Pro, external, and Codex tasks; direct completions; Flash → Pro; Flash → Codex; Pro → Codex; external → Reasonix/Codex; failures; routing overrides; structured failure categories; automatic retry counts; and completed-without-Codex percentages. It also reports average and median successful automated latency by worker and separately labeled median human external-handoff wait time. It does not fabricate token, monetary, or time savings.
+`stats` retains the v1.1 totals and adds observed routing outcomes for initially selected Flash, Pro, external, and Codex tasks; direct completions; Flash → Pro; Flash → Codex; Pro → Codex; external → Reasonix/Codex; failures; routing overrides; structured failure categories; automatic retry counts (always zero under the one-attempt policy); and completed-without-Codex percentages. It also reports average and median successful automated latency by worker and separately labeled median human external-handoff wait time. It does not fabricate token, monetary, or time savings.
 
 If a process is interrupted while a task is `running`, inspect its event log and result directory before changing the task. This v1 intentionally does not guess whether an external side effect occurred.
 
@@ -226,7 +226,7 @@ Add the worker name to the schema, implement a small adapter returning the norma
 ## Troubleshooting
 
 - “Reasonix MCP server was not found”: set `REASONIX_MCP_SERVER` to the existing plugin server.
-- Reasonix failure or timeout: inspect the structured error and per-attempt history. Retryable failures are attempted at most three times before a bounded escalation; permanent failures stop immediately. Do not bypass permissions.
+- Reasonix failure or timeout: inspect the structured error, `outcome`, and `process` stop evidence. Each dispatch makes one attempt; there is no automatic retry or escalation. If the stop state is `unknown` or `running`, confirm the worker stopped before an explicit retry. Permanent failures stop immediately. Do not bypass permissions.
 - “Session is in use”: wait for the other bounded run to finish or close the duplicate Reasonix project window; do not stop the managed MCP tunnel.
 - External worker waits: run `handoff TASK_ID`, submit the prompt in the logged-in ChatGPT tab, then import the answer with `complete --stdin` or `complete --file`.
 - Maximum depth reached: inspect the complete history; create a deliberate child task rather than silently extending an agent loop.

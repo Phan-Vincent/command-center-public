@@ -7,6 +7,7 @@ import contextlib
 import io
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -16,13 +17,14 @@ from unittest import mock
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 
-from agent_orchestrator.adapters import ReasonixAdapter, ExternalChatGPTAdapter, classify_reasonix_failure  # noqa: E402
+from agent_orchestrator.adapters import AdapterRegistry, ReasonixAdapter, ExternalChatGPTAdapter, classify_reasonix_failure  # noqa: E402
 from agent_orchestrator.cli import main as cli_main  # noqa: E402
 from agent_orchestrator.context import build_context_package, external_prompt  # noqa: E402
 from agent_orchestrator.models import OrchestratorError, infer_requirements, normalize_result, utc_now, worker_error  # noqa: E402
 from agent_orchestrator.router import route_task  # noqa: E402
 from agent_orchestrator.store import TaskStore  # noqa: E402
 from agent_orchestrator.supervisor import RetryPolicy, Supervisor  # noqa: E402
+import agent_orchestrator.supervisor as supervisor_module  # noqa: E402
 
 
 class TempProjectTest(unittest.TestCase):
@@ -62,6 +64,15 @@ class StoreAndSchemaTests(TempProjectTest):
         path = self.store.save_result(result, 1)
         self.assertEqual(json.loads(path.read_text())["raw_output"], {"x": 1})
         self.assertEqual(self.store.latest_result(task["task_id"])["summary"], "done")
+
+    def test_cancelled_result_status_is_schema_valid(self):
+        task = self.create()
+        result = normalize_result(
+            task_id=task["task_id"], worker="reasonix_flash", status="cancelled",
+            summary="cancelled", started_at=utc_now(),
+        )
+        path = self.store.save_result(result, 1)
+        self.assertEqual(json.loads(path.read_text())["status"], "cancelled")
 
     def test_legacy_task_without_requirements_remains_readable(self):
         task = self.create()
@@ -156,7 +167,7 @@ class FailureClassificationTests(unittest.TestCase):
             {"error": {"category": "timeout", "code": "PROVIDER_TIMEOUT"}},
         )
         self.assertEqual(inferred_retry["category"], "timeout")
-        self.assertTrue(inferred_retry["retryable"])
+        self.assertFalse(inferred_retry["retryable"])
 
 
 class ContextTests(TempProjectTest):
@@ -209,7 +220,7 @@ class AdapterTests(TempProjectTest):
                     print(json.dumps({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18"}}), flush=True)
                 else:
                     args = request["params"]["arguments"]
-                    payload = {"ok": True, "reasonix": {"result": "bounded worker finding", "usage": {"input_tokens": 3}, "total_cost_usd": 0.001}, "routing": {"worker_tier": args["worker_tier"]}}
+                    payload = {"ok": True, "process": {"local_status": "stopped", "pipes_drained": True}, "reasonix": {"result": "bounded worker finding", "usage": {"input_tokens": 3}, "total_cost_usd": 0.001}, "routing": {"worker_tier": args["worker_tier"]}}
                     print(json.dumps({"jsonrpc":"2.0","id":2,"result":{"content":[],"structuredContent":payload,"isError":False}}), flush=True)
         """), encoding="utf-8")
         task = self.create()
@@ -218,6 +229,53 @@ class AdapterTests(TempProjectTest):
         self.assertIn("bounded worker finding", result["summary"])
         self.assertEqual(result["metadata"]["usage"]["input_tokens"], 3)
         self.assertEqual(result["metadata"]["cost"], 0.001)
+
+    def test_reasonix_mcp_preserves_objective_id_and_engine_evidence(self):
+        server = self.root / "capture_mcp.py"
+        server.write_text("# fixture; subprocess is mocked\n", encoding="utf-8")
+        captured = []
+
+        def fake_run(*_args, **kwargs):
+            request = json.loads(kwargs["input"].splitlines()[1])
+            captured.append(request["params"]["arguments"])
+            payload = {
+                "ok": True,
+                "outcome": "partial",
+                "process": {
+                    "local_status": "stopped", "scope": "owned_local_process_group",
+                    "pipes_drained": True,
+                },
+                "reasonix": {"result": "bounded worker finding"},
+            }
+            response = {"jsonrpc": "2.0", "id": 2, "result": {"structuredContent": payload, "isError": False}}
+            return subprocess.CompletedProcess([], 0, json.dumps(response), "")
+
+        task = self.create("Routine reasoning", worker="reasonix_flash")
+        with mock.patch("agent_orchestrator.adapters.subprocess.run", side_effect=fake_run):
+            result = ReasonixAdapter(server, timeout_seconds=3).run(
+                task, build_context_package(task), "reasonix_flash",
+            )
+        self.assertEqual(captured[0]["task_id"], task["task_id"])
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["metadata"]["outcome"], "partial")
+        self.assertEqual(result["metadata"]["process"]["local_status"], "stopped")
+
+    def test_reasonix_process_timeout_is_nonretryable_with_unknown_stop(self):
+        server = self.root / "timeout_mcp.py"
+        server.write_text("# fixture; subprocess is mocked\n", encoding="utf-8")
+        task = self.create("Routine reasoning", worker="reasonix_flash")
+        with mock.patch(
+            "agent_orchestrator.adapters.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd=["python"], timeout=1),
+        ):
+            result = ReasonixAdapter(server, timeout_seconds=3).run(
+                task, build_context_package(task), "reasonix_flash",
+            )
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error"]["category"], "timeout")
+        self.assertFalse(result["error"]["retryable"])
+        self.assertEqual(result["metadata"]["outcome"], "unknown")
+        self.assertEqual(result["metadata"]["process"]["local_status"], "unknown")
 
     def test_reasonix_malformed_response_fails_closed(self):
         server = self.root / "bad_mcp.py"
@@ -259,7 +317,7 @@ class FakeRegistry:
         return normalize_result(
             task_id=task["task_id"], worker=worker, status=status,
             summary=f"{worker} {status}", started_at=utc_now(),
-            metadata={"runtime_seconds": 1.25},
+            metadata={"runtime_seconds": 1.25, "process": {"local_status": "stopped", "pipes_drained": True}},
         )
 
 
@@ -327,9 +385,9 @@ class SupervisorTests(TempProjectTest):
         self.assertEqual(result["status"], "failed")
         self.assertEqual(self.store.get(task["task_id"])["status"], "failed")
 
-    def test_transient_reasonix_failure_retries_then_succeeds_without_depth_cost(self):
+    def test_transient_failure_runs_once_without_backoff(self):
         transient = worker_error("transient", "upstream timeout", code="HTTP_504", retryable=True)
-        registry = SequencedRegistry([transient, transient, "completed"])
+        registry = SequencedRegistry([transient, "completed"])
         sleeps = []
         policy = RetryPolicy(
             base_delay_seconds=1.0, jitter_ratio=0.0, max_total_seconds=30.0,
@@ -339,16 +397,17 @@ class SupervisorTests(TempProjectTest):
         task = self.create("Routine reasoning")
         result = supervisor.dispatch(task["task_id"])
         state = self.store.get(task["task_id"])
-        self.assertEqual(result["status"], "completed")
-        self.assertEqual(len(registry.calls), 3)
-        self.assertEqual(sleeps, [1.0, 2.0])
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(len(registry.calls), 1)
+        self.assertEqual(sleeps, [])
         self.assertEqual(state["attempt_count"], 1)
         self.assertEqual(state["transition_depth"], 1)
-        self.assertEqual(len(result["metadata"]["execution_attempts"]), 3)
+        self.assertEqual(len(result["metadata"]["execution_attempts"]), 1)
+        self.assertEqual(result["metadata"]["automatic_retry_count"], 0)
         self.assertEqual(len(self.store.results(task["task_id"])), 1)
-        self.assertEqual(
-            [event["event"] for event in self.store.events(task["task_id"])].count("worker_retry_scheduled"),
-            2,
+        self.assertNotIn(
+            "worker_retry_scheduled",
+            [event["event"] for event in self.store.events(task["task_id"])],
         )
 
     def test_permanent_reasonix_failure_does_not_retry(self):
@@ -361,41 +420,34 @@ class SupervisorTests(TempProjectTest):
         self.assertEqual(len(registry.calls), 1)
         self.assertEqual(result["error"]["message"], "invalid API key")
 
-    def test_transient_retry_limit_is_three_and_history_is_preserved(self):
+    def test_failed_reasonix_attempt_is_terminal_until_explicit_recovery(self):
         transient = worker_error("transient", "rate limited", code="HTTP_429", retryable=True)
-        registry = SequencedRegistry([transient, transient, transient])
-        supervisor = Supervisor(
-            self.store, registry,
-            RetryPolicy(base_delay_seconds=0, jitter_ratio=0, sleeper=lambda _: None),
-        )
+        registry = SequencedRegistry([transient])
+        supervisor = Supervisor(self.store, registry)
         task = self.create("Routine reasoning", max_depth=1)
         result = supervisor.dispatch(task["task_id"])
         self.assertEqual(result["status"], "failed")
-        self.assertTrue(result["metadata"]["retry_exhausted"])
-        self.assertEqual(len(registry.calls), 3)
-        self.assertEqual(len(result["metadata"]["execution_attempts"]), 3)
+        self.assertEqual(len(registry.calls), 1)
+        self.assertEqual(len(result["metadata"]["execution_attempts"]), 1)
         self.assertEqual(self.store.get(task["task_id"])["transition_depth"], 1)
         self.assertEqual(supervisor.stats()["routing_outcomes"]["reasonix_flash"]["failed"], 1)
+        with self.assertRaises(OrchestratorError):
+            supervisor.dispatch(task["task_id"])
 
-    def test_flash_retry_exhaustion_escalates_to_pro(self):
-        transient = worker_error("timeout", "read timeout", code="TIMEOUT", retryable=True)
-        registry = SequencedRegistry([transient, transient, transient, "completed"])
-        supervisor = Supervisor(
-            self.store, registry,
-            RetryPolicy(base_delay_seconds=0, jitter_ratio=0, sleeper=lambda _: None),
-        )
+    def test_flash_failure_does_not_automatically_escalate_to_pro(self):
+        timeout = worker_error("timeout", "read timeout", code="TIMEOUT", retryable=False)
+        registry = SequencedRegistry([timeout, "completed"])
+        supervisor = Supervisor(self.store, registry)
         task = self.create("Routine reasoning")
         result = supervisor.dispatch(task["task_id"])
-        self.assertEqual(result["worker"], "reasonix_pro")
-        self.assertEqual([call["worker"] for call in registry.calls], [
-            "reasonix_flash", "reasonix_flash", "reasonix_flash", "reasonix_pro",
-        ])
-        self.assertEqual(self.store.get(task["task_id"])["transition_depth"], 2)
-        self.assertEqual(len(self.store.results(task["task_id"])), 2)
-        self.assertEqual(registry.calls[-1]["escalation_reason"], "flash_verification_failed")
-        self.assertEqual(result["metadata"]["escalation_history"][0]["worker"], "reasonix_flash")
-        persisted = self.store.latest_result(task["task_id"])
-        self.assertEqual(len(persisted["metadata"]["escalation_history"][0]["execution_attempts"]), 3)
+        self.assertEqual(result["worker"], "reasonix_flash")
+        self.assertEqual([call["worker"] for call in registry.calls], ["reasonix_flash"])
+        self.assertEqual(self.store.get(task["task_id"])["transition_depth"], 1)
+        self.assertEqual(len(self.store.results(task["task_id"])), 1)
+        self.assertNotIn(
+            "retry_exhaustion_escalation",
+            [event["event"] for event in self.store.events(task["task_id"])],
+        )
 
     def test_duplicate_completed_run_is_rejected(self):
         supervisor = Supervisor(self.store, FakeRegistry())
@@ -438,8 +490,175 @@ class SupervisorTests(TempProjectTest):
         supervisor = Supervisor(self.store, CancelDuringDispatchRegistry(self.store))
         task = self.create()
         result = supervisor.dispatch(task["task_id"])
-        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["status"], "cancelled")
+        self.assertEqual(result["metadata"]["worker_reported_status"], "completed")
         self.assertEqual(self.store.get(task["task_id"])["status"], "cancelled")
+        persisted = self.store.latest_result(task["task_id"])
+        self.assertEqual(persisted["status"], "cancelled")
+        self.assertEqual(persisted["metadata"]["worker_reported_status"], "completed")
+
+    def test_cancellation_during_context_packaging_skips_worker_dispatch(self):
+        fake = FakeRegistry()
+        supervisor = Supervisor(self.store, fake)
+        task = self.create("Routine reasoning")
+        original = supervisor_module.build_context_package
+
+        def package_then_cancel(task_data, prior=None):
+            package = original(task_data, prior)
+            supervisor.cancel(task["task_id"])
+            return package
+
+        with mock.patch(
+            "agent_orchestrator.supervisor.build_context_package",
+            side_effect=package_then_cancel,
+        ):
+            result = supervisor.dispatch(task["task_id"])
+        self.assertEqual(fake.calls, [])
+        self.assertEqual(result["status"], "cancelled")
+        self.assertEqual(self.store.get(task["task_id"])["status"], "cancelled")
+        self.assertEqual(self.store.latest_result(task["task_id"])["status"], "cancelled")
+
+    def test_cancellation_during_packaging_failure_stays_cancelled(self):
+        fake = FakeRegistry()
+        supervisor = Supervisor(self.store, fake)
+        task = self.create("Routine reasoning")
+
+        def cancel_then_fail(task_data, prior=None):
+            supervisor.cancel(task["task_id"])
+            raise PermissionError("synthetic packaging failure")
+
+        with mock.patch(
+            "agent_orchestrator.supervisor.build_context_package",
+            side_effect=cancel_then_fail,
+        ):
+            result = supervisor.dispatch(task["task_id"])
+        self.assertEqual(fake.calls, [])
+        self.assertEqual(result["status"], "cancelled")
+        self.assertEqual(self.store.get(task["task_id"])["status"], "cancelled")
+        self.assertEqual(self.store.latest_result(task["task_id"])["status"], "cancelled")
+
+    def test_context_packaging_permission_error_is_durable_not_started_and_retryable(self):
+        fake = FakeRegistry()
+        supervisor = Supervisor(self.store, fake)
+        blocked = self.project / "unreadable.txt"
+        blocked.write_text("fixture", encoding="utf-8")
+        task = self.create("Inspect selected file", files=["unreadable.txt"])
+        original_read = Path.read_text
+
+        def unreadable(path, *args, **kwargs):
+            if Path(path).resolve() == blocked.resolve():
+                raise PermissionError("synthetic inaccessible input")
+            return original_read(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "read_text", unreadable):
+            result = supervisor.dispatch(task["task_id"])
+
+        state = self.store.get(task["task_id"])
+        persisted = self.store.latest_result(task["task_id"])
+        self.assertEqual(fake.calls, [])
+        self.assertEqual(state["status"], "failed")
+        self.assertIn("Context packaging failed", state["error"])
+        self.assertIn("synthetic inaccessible input", result["summary"])
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error"]["code"], "CONTEXT_PACKAGING_FAILED")
+        self.assertEqual(result["metadata"]["process"]["local_status"], "not_started")
+        self.assertEqual(result["metadata"]["outcome"], "not_started")
+        self.assertEqual(persisted["status"], "failed")
+        self.assertEqual(persisted["metadata"]["process"]["local_status"], "not_started")
+
+        retried = supervisor.dispatch(task["task_id"], retry=True)
+        self.assertEqual(retried["status"], "completed")
+        self.assertEqual(len(fake.calls), 1)
+        self.assertEqual(self.store.get(task["task_id"])["status"], "completed")
+
+    def test_unknown_worker_stop_runs_one_attempt_and_blocks_recovery(self):
+        server = self.root / "unknown_mcp.py"
+        server.write_text("# fixture; subprocess is mocked\n", encoding="utf-8")
+        calls = []
+
+        def fake_run(*_args, **kwargs):
+            arguments = json.loads(kwargs["input"].splitlines()[1])["params"]["arguments"]
+            calls.append(arguments)
+            payload = {
+                "ok": False,
+                "outcome": "unknown",
+                "error": "worker timed out",
+                "failure": {"code": "TIMEOUT"},
+                "process": {"local_status": "unknown", "scope": "unknown", "pipes_drained": False},
+            }
+            response = {"jsonrpc": "2.0", "id": 2, "result": {"structuredContent": payload, "isError": True}}
+            return subprocess.CompletedProcess([], 0, json.dumps(response), "")
+
+        store = self.store
+        adapter = ReasonixAdapter(server, timeout_seconds=3)
+        supervisor = Supervisor(
+            store, AdapterRegistry(store, reasonix=adapter),
+            RetryPolicy(sleeper=lambda _: self.fail("automatic backoff must not run")),
+        )
+        task = self.create("Routine reasoning")
+        with mock.patch("agent_orchestrator.adapters.subprocess.run", side_effect=fake_run):
+            result = supervisor.dispatch(task["task_id"])
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["task_id"], task["task_id"])
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["worker"], "reasonix_flash")
+        self.assertEqual(result["error"]["category"], "unknown")
+        self.assertFalse(result["error"]["retryable"])
+        self.assertEqual(result["metadata"]["outcome"], "unknown")
+        self.assertEqual(result["metadata"]["process"]["local_status"], "unknown")
+        state = self.store.get(task["task_id"])
+        self.assertEqual(state["status"], "failed")
+        self.assertEqual(state["transition_depth"], 1)
+        self.assertEqual(len(self.store.results(task["task_id"])), 1)
+        self.assertNotIn(
+            "retry_exhaustion_escalation",
+            [event["event"] for event in self.store.events(task["task_id"])],
+        )
+
+        with self.assertRaises(OrchestratorError) as raised:
+            supervisor.dispatch(task["task_id"], retry=True)
+        self.assertIn("stop state", str(raised.exception))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(self.store.get(task["task_id"])["transition_depth"], 1)
+
+    def test_explicit_recovery_after_not_started_failure_reuses_objective_id(self):
+        server = self.root / "launch_mcp.py"
+        server.write_text("# fixture; subprocess is mocked\n", encoding="utf-8")
+        task_ids = []
+        attempt = {"count": 0}
+
+        def fake_run(*_args, **kwargs):
+            arguments = json.loads(kwargs["input"].splitlines()[1])["params"]["arguments"]
+            task_ids.append(arguments["task_id"])
+            attempt["count"] += 1
+            if attempt["count"] == 1:
+                raise OSError("synthetic launch failure")
+            payload = {
+                "ok": True,
+                "outcome": "partial",
+                "process": {
+                    "local_status": "stopped", "scope": "owned_local_process_group",
+                    "pipes_drained": True,
+                },
+                "reasonix": {"result": "recovered"},
+            }
+            response = {"jsonrpc": "2.0", "id": 2, "result": {"structuredContent": payload, "isError": False}}
+            return subprocess.CompletedProcess([], 0, json.dumps(response), "")
+
+        adapter = ReasonixAdapter(server, timeout_seconds=3)
+        supervisor = Supervisor(self.store, AdapterRegistry(self.store, reasonix=adapter))
+        task = self.create("Routine reasoning")
+        with mock.patch("agent_orchestrator.adapters.subprocess.run", side_effect=fake_run):
+            first = supervisor.dispatch(task["task_id"])
+        self.assertEqual(first["status"], "failed")
+        self.assertEqual(first["metadata"]["process"]["local_status"], "not_started")
+        self.assertEqual(self.store.get(task["task_id"])["status"], "failed")
+
+        with mock.patch("agent_orchestrator.adapters.subprocess.run", side_effect=fake_run):
+            recovered = supervisor.dispatch(task["task_id"], retry=True)
+        self.assertEqual(recovered["status"], "completed")
+        self.assertEqual(task_ids, [task["task_id"], task["task_id"]])
 
     def test_retry_waiting_task(self):
         supervisor, task, _ = self.external_handoff()
@@ -545,6 +764,97 @@ class SupervisorTests(TempProjectTest):
         self.assertEqual(result["status"], "completed")
         self.assertEqual(self.store.get(task["task_id"])["status"], "completed")
         self.assertEqual(len(self.store.results(task["task_id"])), 2)
+
+
+class RecoveryBoundaryTests(TempProjectTest):
+    def test_incomplete_stop_evidence_blocks_even_completed_followup(self):
+        cases = [
+            {},
+            {"process": {"local_status": "stopped", "pipes_drained": False}},
+            {"process": {"local_status": "stopped", "pipes_drained": True, "remote_status": "unknown"}},
+            {"outcome": "unknown", "process": {"local_status": "stopped", "pipes_drained": True}},
+            {"process": {"local_status": "stopped", "status": "unknown", "pipes_drained": True}},
+        ]
+        for metadata in cases:
+            with self.subTest(metadata=metadata):
+                task = self.create(worker="reasonix_flash")
+                result = normalize_result(task_id=task["task_id"], worker="reasonix_flash", status="completed",
+                                          summary="legacy report", started_at=utc_now(), metadata=metadata)
+                self.store.save_result(result, 1)
+                task["status"] = "completed"
+                self.store.save(task)
+                fake = FakeRegistry()
+                with self.assertRaisesRegex(OrchestratorError, "stop state"):
+                    Supervisor(self.store, fake).dispatch(task["task_id"], worker="codex", allow_completed=True)
+                self.assertEqual(fake.calls, [])
+
+    def test_manual_completion_cannot_hide_an_unresolved_attempt(self):
+        task = self.create(worker="reasonix_flash")
+        result = normalize_result(task_id=task["task_id"], worker="reasonix_flash", status="failed",
+                                  summary="unknown worker", started_at=utc_now(), metadata={"outcome": "unknown"})
+        self.store.save_result(result, 1)
+        task.update(status="failed", attempt_count=1)
+        self.store.save(task)
+        fake = FakeRegistry()
+        supervisor = Supervisor(self.store, fake)
+        supervisor.complete(task["task_id"], "manually marked complete")
+        with self.assertRaisesRegex(OrchestratorError, "stop state"):
+            supervisor.dispatch(task["task_id"], worker="codex", allow_completed=True)
+        self.assertEqual(fake.calls, [])
+
+    def test_timeout_bytes_persist_and_block_recovery(self):
+        server = self.root / "unused_mcp.py"
+        server.touch()
+        task = self.create(worker="reasonix_flash")
+        supervisor = Supervisor(self.store, AdapterRegistry(self.store, reasonix=ReasonixAdapter(server)))
+        with mock.patch("agent_orchestrator.adapters.subprocess.run",
+                        side_effect=subprocess.TimeoutExpired("fixture", 1, output=b"partial\xff", stderr=b"error")):
+            result = supervisor.dispatch(task["task_id"])
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(self.store.get(task["task_id"])["status"], "failed")
+        self.assertEqual(self.store.latest_result(task["task_id"])["raw_output"]["stdout"], "partial\ufffd")
+        with self.assertRaisesRegex(OrchestratorError, "stop state"):
+            supervisor.dispatch(task["task_id"], retry=True)
+
+    def test_failed_result_write_retains_unknown_worker_guard(self):
+        task = self.create(worker="reasonix_flash")
+        fake = mock.Mock()
+        fake.dispatch.return_value = normalize_result(
+            task_id=task["task_id"], worker="reasonix_flash", status="completed", summary="unconfirmed",
+            started_at=utc_now(), metadata={"outcome": "unknown"})
+        supervisor = Supervisor(self.store, fake)
+        with mock.patch.object(self.store, "save_result", side_effect=OSError("synthetic result write failure")):
+            result = supervisor.dispatch(task["task_id"])
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(self.store.get(task["task_id"])["status"], "failed")
+        self.assertEqual(self.store.results(task["task_id"]), [])
+        with self.assertRaisesRegex(OrchestratorError, "stop state"):
+            supervisor.dispatch(task["task_id"], retry=True)
+        self.assertEqual(fake.dispatch.call_count, 1)
+
+    def test_packaging_and_result_write_failure_remains_safe_to_retry(self):
+        task = self.create(worker="reasonix_flash")
+        fake = FakeRegistry()
+        supervisor = Supervisor(self.store, fake)
+        with mock.patch.object(self.store, "save_context", side_effect=OSError("context write failed")), \
+                mock.patch.object(self.store, "save_result", side_effect=OSError("result write failed")):
+            result = supervisor.dispatch(task["task_id"])
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(fake.calls, [])
+        self.assertEqual(self.store.get(task["task_id"])["last_dispatch"]["metadata"]["process"]["local_status"], "not_started")
+        self.assertEqual(supervisor.dispatch(task["task_id"], retry=True)["status"], "completed")
+        self.assertEqual(len(fake.calls), 1)
+
+    def test_unknown_or_terminal_failure_overrides_retry_claim(self):
+        for category in ("timeout", "cancelled", "unknown"):
+            result = classify_reasonix_failure("HTTP 503", {"error": {"category": category, "retryable": True}})
+            self.assertFalse(result["retryable"])
+        result = classify_reasonix_failure("HTTP 503", {
+            "outcome": "unknown", "failure": {"code": "TIMEOUT"},
+            "error": {"category": "transient", "retryable": True}})
+        self.assertEqual(result["category"], "unknown")
+        self.assertEqual(result["code"], "TIMEOUT")
+        self.assertFalse(result["retryable"])
 
 
 class CliTests(TempProjectTest):

@@ -10,16 +10,23 @@ import statistics
 import time
 from typing import Any, Callable
 
-from .adapters import AdapterRegistry
+from .adapters import AdapterRegistry, worker_stop_confirmed
 from .context import build_context_package
-from .models import OrchestratorError, normalize_result, task_requirements, utc_now, worker_error
+from .models import RESULT_STATUSES, OrchestratorError, normalize_result, utc_now, worker_error
 from .router import route_task
 from .store import TaskStore
 
 
 @dataclass
 class RetryPolicy:
-    max_attempts: int = 3
+    """Compatibility holder for the retired retry ladder.
+
+    The installed policy is one attempt per dispatch. Backoff and automatic
+    escalation no longer run; the fields remain so existing callers that
+    construct a policy keep working.
+    """
+
+    max_attempts: int = 1
     base_delay_seconds: float = 1.0
     multiplier: float = 2.0
     max_delay_seconds: float = 2.5
@@ -68,7 +75,113 @@ class Supervisor:
             self.store.log_event(task_id, "route_explained", {"worker": decision["worker"], "path": str(path)})
         return record
 
-    def _execute_with_retries(
+    @staticmethod
+    def _stop_state(record: dict[str, Any] | None) -> str | None:
+        """Return recorded local stop evidence for a prior worker attempt."""
+        if not isinstance(record, dict):
+            return None
+        metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+        process = metadata.get("process") if isinstance(metadata.get("process"), dict) else {}
+        local = process.get("local_status")
+        reported = process.get("status")
+        # The engine may mark `status: unknown` even when only the outer wrapper
+        # stopped; a separately grouped worker is then not proven stopped.
+        for value in (local, reported):
+            if value in {"unknown", "running"}:
+                return str(value)
+        state = local or reported or metadata.get("process_local_status")
+        return str(state) if state else None
+
+    def _prior_stop_blocks(self, record: dict[str, Any] | None) -> str | None:
+        """Block overlapping work when a prior worker may still be running."""
+        if not isinstance(record, dict) or record.get("worker") not in {"reasonix_flash", "reasonix_pro"}:
+            return None
+        if record.get("confidence") == "manually_recorded":
+            # Manual records do not establish a worker stop; dispatch also
+            # checks all preceding attempts so they cannot hide uncertainty.
+            return None
+        state = self._stop_state(record)
+        if worker_stop_confirmed(record.get("metadata")):
+            return None
+        return (
+            f"prior {record.get('worker')} worker stop state is not confirmed ({state or 'unknown'}); "
+            "confirm that worker is stopped before continuing"
+        )
+
+    @staticmethod
+    def _cancelled_result(
+        task_id: str,
+        worker: str,
+        started_at: str,
+        prior: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        prior = prior if isinstance(prior, dict) else {}
+        metadata = dict(prior.get("metadata") or {})
+        metadata["cancelled"] = True
+        metadata.setdefault("outcome", "cancelled")
+        if prior:
+            metadata["worker_reported_status"] = prior.get("status")
+        return normalize_result(
+            task_id=task_id, worker=worker, status="cancelled",
+            summary="Task was cancelled; worker output was not accepted.",
+            findings=list(prior.get("findings") or []),
+            recommended_next_action="No further work will run for a cancelled task.",
+            uncertainties=(
+                ["Worker output arrived after cancellation and was not accepted."]
+                if prior else ["No worker was dispatched."]
+            ),
+            raw_output=prior.get("raw_output"),
+            started_at=prior.get("started_at") or started_at,
+            metadata=metadata,
+        )
+
+    def _finalize(
+        self,
+        task_id: str,
+        result: dict[str, Any],
+        attempt: int,
+        *,
+        selected: str,
+        started_at: str,
+    ) -> dict[str, Any]:
+        with self.store.task_lock(task_id):
+            task = self.store.get(task_id)
+            cancelled = task["status"] == "cancelled"
+            if cancelled and result.get("status") != "cancelled":
+                result = self._cancelled_result(task_id, selected, started_at, result)
+            # Retain safety evidence in the task even if its result file cannot
+            # be written. An empty result history must never imply safe retry.
+            task["last_dispatch"] = {
+                "worker": selected, "status": result["status"],
+                "metadata": {key: result.get("metadata", {}).get(key)
+                             for key in ("outcome", "process")},
+            }
+            try:
+                result_path = self.store.save_result(result, attempt)
+            except (OSError, TypeError, ValueError) as exc:
+                task["status"] = "cancelled" if cancelled else "failed"
+                task["error"] = f"{result.get('summary', 'dispatch failed')} (result persistence failed: {exc})"
+                result["status"] = task["status"]
+                result["summary"] = task["error"]
+                result["error"] = worker_error("unknown", str(exc), code="RESULT_PERSISTENCE_FAILED", retryable=False)
+                self.store.save(task)
+                self.store.log_event(task_id, "result_persistence_failed", {"error": str(exc)})
+                result.setdefault("metadata", {})["result_persistence_error"] = str(exc)
+                return result
+            if not cancelled:
+                task["status"] = result["status"]
+            task["result_path"] = str(result_path)
+            task["error"] = result.get("summary") if result.get("status") == "failed" else None
+            self.store.save(task)
+            self.store.log_event(task_id, "result", {
+                "worker": selected, "status": result["status"], "path": str(result_path),
+                "runtime_seconds": result.get("metadata", {}).get("runtime_seconds"),
+                "automatic_retry_count": result.get("metadata", {}).get("automatic_retry_count", 0),
+                "task_remained_cancelled": cancelled,
+            })
+        return result
+
+    def _execute_once(
         self,
         selected: str,
         task: dict[str, Any],
@@ -76,75 +189,53 @@ class Supervisor:
         *,
         escalation_reason: str | None,
     ) -> dict[str, Any]:
-        history: list[dict[str, Any]] = []
-        overall_started = time.monotonic()
-        result: Any = None
-        max_attempts = self.retry_policy.max_attempts if selected in {"reasonix_flash", "reasonix_pro"} else 1
-        for execution_attempt in range(1, max_attempts + 1):
-            attempt_started_at = utc_now()
-            attempt_started = time.monotonic()
-            try:
-                result = self.adapters.dispatch(
-                    selected, task, package, escalation_reason=escalation_reason,
-                )
-            except Exception as exc:  # adapter bugs are durable but never automatically retried
-                message = f"Worker adapter failed safely: {exc}"
-                result = normalize_result(
-                    task_id=task["task_id"], worker=selected, status="failed",
-                    summary=message, started_at=attempt_started_at,
-                    recommended_next_action="Inspect the adapter failure before retrying.",
-                    error=worker_error("unknown", str(exc), code="ADAPTER_EXCEPTION", retryable=False),
-                )
-            latency = round(time.monotonic() - attempt_started, 3)
-            error = result.get("error") if isinstance(result, dict) else None
-            history.append({
-                "attempt_number": execution_attempt,
-                "worker": selected,
-                "started_at": attempt_started_at,
-                "ended_at": utc_now(),
-                "latency_seconds": latency,
-                "status": result.get("status", "invalid") if isinstance(result, dict) else "invalid",
-                "error": error,
-            })
-            if not isinstance(result, dict) or result.get("status") != "failed":
-                break
-            retryable = isinstance(error, dict) and error.get("retryable") is True
-            if not retryable:
-                break
-            if execution_attempt >= max_attempts:
-                result.setdefault("metadata", {})["retry_exhausted"] = True
-                break
-            elapsed = time.monotonic() - overall_started
-            delay = self.retry_policy.delay(execution_attempt)
-            if elapsed + delay > self.retry_policy.max_total_seconds:
-                result.setdefault("metadata", {})["retry_exhausted"] = True
-                result["metadata"]["retry_deadline_reached"] = True
-                break
-            current = self.store.get(task["task_id"])
-            if current["status"] == "cancelled":
-                break
-            self.store.log_event(task["task_id"], "worker_retry_scheduled", {
-                "worker": selected,
-                "completed_attempt": execution_attempt,
-                "next_attempt": execution_attempt + 1,
-                "delay_seconds": round(delay, 3),
-                "error": error,
-            })
-            self.retry_policy.sleeper(delay)
-
-        if not isinstance(result, dict) or result.get("status") not in {"completed", "failed", "waiting_for_user"}:
+        """Run exactly one worker attempt; there is no automatic retry ladder."""
+        attempt_started_at = utc_now()
+        attempt_started = time.monotonic()
+        try:
+            result = self.adapters.dispatch(
+                selected, task, package, escalation_reason=escalation_reason,
+            )
+        except Exception as exc:  # adapter bugs are durable but never retried
+            message = f"Worker adapter failed safely: {exc}"
+            result = normalize_result(
+                task_id=task["task_id"], worker=selected, status="failed",
+                summary=message, started_at=attempt_started_at,
+                recommended_next_action="Inspect the adapter failure and confirm any worker stop before an explicit retry.",
+                metadata={
+                    "process": {"local_status": "unknown", "scope": "unknown", "pipes_drained": None},
+                    "outcome": "unknown",
+                },
+                error=worker_error("unknown", str(exc), code="ADAPTER_EXCEPTION", retryable=False),
+            )
+        latency = round(time.monotonic() - attempt_started, 3)
+        history = [{
+            "attempt_number": 1,
+            "worker": selected,
+            "started_at": attempt_started_at,
+            "ended_at": utc_now(),
+            "latency_seconds": latency,
+            "status": result.get("status", "invalid") if isinstance(result, dict) else "invalid",
+            "error": result.get("error") if isinstance(result, dict) else None,
+        }]
+        if not isinstance(result, dict) or result.get("status") not in RESULT_STATUSES:
             raw_result = result
             message = "Worker adapter returned an invalid normalized result."
             result = normalize_result(
                 task_id=task["task_id"], worker=selected, status="failed",
                 summary=message, started_at=utc_now(), raw_output=raw_result,
-                recommended_next_action="Fix or inspect the adapter before retrying.",
+                recommended_next_action="Fix or inspect the adapter and confirm any worker stop before an explicit retry.",
+                metadata={
+                    "process": {"local_status": "unknown", "scope": "unknown", "pipes_drained": None},
+                    "outcome": "unknown",
+                },
                 error=worker_error("unknown", message, code="INVALID_RESULT", retryable=False),
             )
         metadata = result.setdefault("metadata", {})
         metadata["execution_attempts"] = history
-        metadata["automatic_retry_count"] = max(0, len(history) - 1)
-        metadata["automated_latency_seconds"] = round(time.monotonic() - overall_started, 3)
+        metadata["automatic_retry_count"] = 0
+        metadata["automatic_retries_disabled"] = True
+        metadata["automated_latency_seconds"] = latency
         return result
 
     def dispatch(
@@ -155,7 +246,6 @@ class Supervisor:
         retry: bool = False,
         allow_completed: bool = False,
         override_reason: str | None = None,
-        _escalation_reason: str | None = None,
     ) -> dict[str, Any]:
         with self.store.task_lock(task_id):
             task = self.store.get(task_id)
@@ -171,17 +261,13 @@ class Supervisor:
                 raise OrchestratorError(f"maximum worker-transition depth reached ({task['max_depth']})")
 
             previous_results = self.store.results(task_id)
+            for record in [task.get("last_dispatch"), *previous_results]:
+                blocked = self._prior_stop_blocks(record)
+                if blocked:
+                    raise OrchestratorError(blocked)
             requested_worker = task.get("worker") if retry and worker is None else worker
             automatic_decision = route_task(task, honor_created_worker=False)
             decision = route_task(task, requested_worker)
-            if _escalation_reason:
-                decision = {
-                    **decision,
-                    "reason": _escalation_reason,
-                    "reasons": [_escalation_reason],
-                    "rule": "retry_exhaustion_escalation",
-                    "explicit_override": False,
-                }
             selected = decision["worker"]
             escalation_reason = None
             if selected == "reasonix_pro":
@@ -221,64 +307,42 @@ class Supervisor:
             })
 
         prior = previous_results[-1] if previous_results else None
-        package = build_context_package(task, prior)
-        context_path = self.store.save_context(task_id, attempt, package)
+        started_at = utc_now()
+        try:
+            package = build_context_package(task, prior)
+            context_path = self.store.save_context(task_id, attempt, package)
+        except Exception as exc:
+            # A packaging/read/persistence failure means the worker never
+            # started. Record a durable terminal state instead of leaving the
+            # task stuck as running.
+            message = f"Context packaging failed before worker dispatch: {exc}"
+            self.store.log_event(task_id, "context_packaging_failed", {
+                "error": str(exc), "attempt": attempt,
+            })
+            result = normalize_result(
+                task_id=task_id, worker=selected, status="failed",
+                summary=message, started_at=started_at,
+                recommended_next_action="Fix the input or storage error, then retry explicitly.",
+                uncertainties=["The worker was not started."],
+                metadata={
+                    "process": {"local_status": "not_started", "scope": "not_started", "pipes_drained": True},
+                    "outcome": "not_started",
+                    "packaging_error": str(exc),
+                },
+                error=worker_error("invalid_input", message, code="CONTEXT_PACKAGING_FAILED", retryable=True),
+            )
+            return self._finalize(task_id, result, attempt, selected=selected, started_at=started_at)
         self.store.log_event(task_id, "context_packaged", {"path": str(context_path)})
-        result = self._execute_with_retries(
+
+        # Cancellation is authoritative even when it arrives after packaging.
+        if self.store.get(task_id)["status"] == "cancelled":
+            self.store.log_event(task_id, "cancelled_before_dispatch", {"attempt": attempt})
+            result = self._cancelled_result(task_id, selected, started_at)
+            return self._finalize(task_id, result, attempt, selected=selected, started_at=started_at)
+        result = self._execute_once(
             selected, task, package, escalation_reason=escalation_reason,
         )
-        result_path = self.store.save_result(result, attempt)
-        with self.store.task_lock(task_id):
-            task = self.store.get(task_id)
-            was_cancelled = task["status"] == "cancelled"
-            if not was_cancelled:
-                task["status"] = result["status"]
-            task["result_path"] = str(result_path)
-            task["error"] = result["summary"] if result["status"] == "failed" else None
-            self.store.save(task)
-            self.store.log_event(task_id, "result", {
-                "worker": selected, "status": result["status"], "path": str(result_path),
-                "runtime_seconds": result.get("metadata", {}).get("runtime_seconds"),
-                "automatic_retry_count": result.get("metadata", {}).get("automatic_retry_count", 0),
-                "task_remained_cancelled": was_cancelled,
-            })
-        if (
-            result["status"] == "failed"
-            and result.get("metadata", {}).get("retry_exhausted") is True
-            and selected in {"reasonix_flash", "reasonix_pro"}
-        ):
-            current = self.store.get(task_id)
-            if current["status"] != "cancelled" and current["transition_depth"] < current["max_depth"]:
-                requirements = task_requirements(current)
-                if selected == "reasonix_flash":
-                    next_worker = "codex" if requirements["repo_write"] or requirements["terminal"] else "reasonix_pro"
-                else:
-                    next_worker = "codex"
-                reason = (
-                    f"{selected} failed after {len(result['metadata']['execution_attempts'])} transient attempts; "
-                    + ("authoritative repository execution is required" if next_worker == "codex" else "escalating to Reasonix Pro")
-                )
-                self.store.log_event(task_id, "retry_exhaustion_escalation", {
-                    "from_worker": selected, "to_worker": next_worker, "reason": reason,
-                })
-                escalated_result = self.dispatch(
-                    task_id,
-                    worker=next_worker,
-                    retry=True,
-                    _escalation_reason=reason,
-                )
-                escalated_result.setdefault("metadata", {}).setdefault("escalation_history", []).insert(0, {
-                    "worker": selected,
-                    "status": result["status"],
-                    "summary": result["summary"],
-                    "error": result.get("error"),
-                    "execution_attempts": result.get("metadata", {}).get("execution_attempts", []),
-                    "escalation_reason": reason,
-                })
-                final_state = self.store.get(task_id)
-                self.store.save_result(escalated_result, final_state["attempt_count"])
-                return escalated_result
-        return result
+        return self._finalize(task_id, result, attempt, selected=selected, started_at=started_at)
 
     def reroute(self, task_id: str, worker: str, reason: str) -> dict[str, Any]:
         if not reason or not reason.strip():

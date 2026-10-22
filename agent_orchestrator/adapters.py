@@ -24,6 +24,49 @@ def _summary(text: str, limit: int = 700) -> str:
 # something a retry fixes.
 UNAVAILABLE_CODES = frozenset({"EXECUTABLE_MISSING", "LAUNCH_FAILURE"})
 
+# Safe stop evidence: the worker either never started or was observed stopped.
+NOT_STARTED_PROCESS = {"local_status": "not_started", "scope": "not_started", "pipes_drained": True}
+# The outer response is not evidence that a separately grouped worker stopped.
+UNKNOWN_PROCESS = {"local_status": "unknown", "scope": "unknown", "pipes_drained": None}
+
+
+def worker_stop_confirmed(metadata: Any) -> bool:
+    """Require affirmative cleanup evidence before another worker may start."""
+    if not isinstance(metadata, dict) or metadata.get("outcome") in {"unknown", "running"}:
+        return False
+    process = metadata.get("process")
+    return (
+        isinstance(process, dict)
+        and process.get("local_status") in {"stopped", "not_started"}
+        and process.get("status") not in {"unknown", "running"}
+        and process.get("remote_status") in {None, "not_applicable", "not_started", "stopped"}
+        and process.get("pipes_drained") is True
+    )
+
+
+def _engine_metadata(
+    payload: Any,
+    started: float,
+    *,
+    default_process: dict[str, Any] | None = None,
+    default_outcome: str | None = None,
+) -> dict[str, Any]:
+    """Preserve the engine's outcome and process-stop evidence for the supervisor."""
+    metadata: dict[str, Any] = {"runtime_seconds": round(time.monotonic() - started, 3)}
+    process = default_process
+    if isinstance(payload, dict):
+        if isinstance(payload.get("process"), dict):
+            process = payload["process"]
+        if payload.get("outcome") is not None:
+            metadata["outcome"] = payload["outcome"]
+        if payload.get("task_id"):
+            metadata["objective_id"] = payload["task_id"]
+    if process is not None:
+        metadata["process"] = process
+    if "outcome" not in metadata and default_outcome is not None:
+        metadata["outcome"] = default_outcome
+    return metadata
+
 
 def classify_reasonix_failure(message: str, structured: Any = None) -> dict[str, Any]:
     """Classify a Reasonix failure, preferring trusted structured fields."""
@@ -32,33 +75,39 @@ def classify_reasonix_failure(message: str, structured: Any = None) -> dict[str,
     category = structured_error.get("category") if isinstance(structured_error, dict) else None
     retryable = structured_error.get("retryable") if isinstance(structured_error, dict) else None
     code = structured_error.get("code") if isinstance(structured_error, dict) else None
-    if category in FAILURE_CATEGORIES:
-        if not isinstance(retryable, bool):
-            retryable = category in {"transient", "timeout"}
-        return worker_error(category, message, code=str(code) if code else None, retryable=retryable)
-    # The engine's canonical identity: `failure.code`, else the flat `error_code`.
-    # It names the failure but never makes it retryable on its own.
     failure = data.get("failure") if isinstance(data.get("failure"), dict) else {}
     canonical = code or failure.get("code") or data.get("error_code")
     canonical = str(canonical)[:128] if canonical else None
+    if data.get("outcome") in {"unknown", "running"} or (
+        isinstance(data.get("process"), dict) and not worker_stop_confirmed(data)
+    ):
+        return worker_error("unknown", message, code=canonical or "UNCONFIRMED_STOP", retryable=False)
+    if category in FAILURE_CATEGORIES:
+        if category in {"timeout", "cancelled", "unknown"}:
+            retryable = False
+        if not isinstance(retryable, bool):
+            # Only transient provider failures are retryable in principle. The
+            # supervisor never retries automatically; timeouts and unknown stops
+            # also require safe-stop evidence before explicit recovery.
+            retryable = category == "transient"
+        return worker_error(category, message, code=str(code) if code else None, retryable=retryable)
+    # The engine's canonical identity: `failure.code`, else the flat `error_code`.
+    # It names the failure but never makes it retryable on its own.
     if canonical in UNAVAILABLE_CODES:
         return worker_error("worker_unavailable", message, code=canonical, retryable=False)
 
     text = " ".join(
         str(value) for value in (message, code, data.get("stderr"), data.get("parse_error")) if value
     ).lower()
+    if any(phrase in text for phrase in ("cancelled", "canceled", "explicit cancellation")):
+        return worker_error("cancelled", message, code=canonical or "CANCELLED", retryable=False)
+    if "timed out" in text or "timeout" in text:
+        return worker_error("timeout", message, code=canonical or "TIMEOUT", retryable=False)
     http_match = next((value for value in ("429", "500", "502", "503", "504") if re.search(rf"\b(?:http[ _-]?)?{value}\b", text)), None)
     if http_match:
         return worker_error("transient", message, code=canonical or f"HTTP_{http_match}", retryable=True)
-    if any(phrase in text for phrase in (
-        "connection reset", "connection timeout", "read timeout", "temporary network failure",
-        "upstream unavailable", "temporarily unavailable",
-    )):
+    if any(phrase in text for phrase in ("connection reset", "temporary network failure", "upstream unavailable", "temporarily unavailable")):
         return worker_error("transient", message, code=canonical or "NETWORK_TRANSIENT", retryable=True)
-    if "timed out" in text or "timeout" in text:
-        return worker_error("timeout", message, code=canonical or "TIMEOUT", retryable=True)
-    if any(phrase in text for phrase in ("cancelled", "canceled", "explicit cancellation")):
-        return worker_error("cancelled", message, code=canonical or "CANCELLED", retryable=False)
     if any(phrase in text for phrase in (
         "authentication failure", "invalid api key", "unauthorized", "permission denied",
         "invalid model", "forbidden",
@@ -104,10 +153,12 @@ class ReasonixAdapter:
                 summary=message, started_at=started_at,
                 recommended_next_action="Set REASONIX_MCP_SERVER to the existing reasonix_mcp.py path.",
                 uncertainties=["Reasonix availability was not probed."],
+                metadata=_engine_metadata(None, started, default_process=NOT_STARTED_PROCESS, default_outcome="not_started"),
                 error=worker_error("worker_unavailable", message, code="MCP_NOT_FOUND", retryable=False),
             )
         arguments: dict[str, Any] = {
             "dir": task["project"],
+            "task_id": task["task_id"],
             "task_contract": reasonix_contract(package, worker),
             "worker_tier": "pro" if worker == "reasonix_pro" else "flash",
             "max_steps": 18,
@@ -130,10 +181,11 @@ class ReasonixAdapter:
             return normalize_result(
                 task_id=task["task_id"], worker=worker, status="failed",
                 summary=message, started_at=started_at,
-                raw_output={"stdout": exc.stdout, "stderr": exc.stderr},
-                recommended_next_action="Narrow the task before an explicit retry.",
-                metadata={"runtime_seconds": round(time.monotonic() - started, 3)},
-                error=worker_error("timeout", message, code="PROCESS_TIMEOUT", retryable=True),
+                raw_output={key: value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value
+                            for key, value in (("stdout", exc.stdout), ("stderr", exc.stderr))},
+                recommended_next_action="Confirm the prior worker is stopped before an explicit retry.",
+                metadata=_engine_metadata(None, started, default_process=UNKNOWN_PROCESS, default_outcome="unknown"),
+                error=worker_error("timeout", message, code="PROCESS_TIMEOUT", retryable=False),
             )
         except OSError as exc:
             message = f"Reasonix MCP could not start: {exc}"
@@ -144,7 +196,7 @@ class ReasonixAdapter:
                 task_id=task["task_id"], worker=worker, status="failed",
                 summary=message, started_at=started_at,
                 recommended_next_action="Verify the configured MCP server and Python runtime.",
-                metadata={"runtime_seconds": round(time.monotonic() - started, 3)},
+                metadata=_engine_metadata(None, started, default_process=NOT_STARTED_PROCESS, default_outcome="not_started"),
                 error=failure,
             )
 
@@ -168,8 +220,8 @@ class ReasonixAdapter:
             return normalize_result(
                 task_id=task["task_id"], worker=worker, status="failed",
                 summary=message, started_at=started_at,
-                raw_output=raw, recommended_next_action="Inspect the bounded raw response before retrying.",
-                metadata={"runtime_seconds": round(time.monotonic() - started, 3)},
+                raw_output=raw, recommended_next_action="Inspect the bounded raw response before an explicit retry.",
+                metadata=_engine_metadata(None, started, default_process=UNKNOWN_PROCESS, default_outcome="unknown"),
                 error=failure,
             )
         tool_result = response.get("result", {})
@@ -200,8 +252,17 @@ class ReasonixAdapter:
                 summary=message, started_at=started_at,
                 raw_output=raw, uncertainties=["No successful worker result was verified."],
                 recommended_next_action="Inspect the failure and make an explicit, narrower retry.",
-                metadata={"runtime_seconds": round(time.monotonic() - started, 3), "routing": payload.get("routing") if isinstance(payload, dict) else None},
+                metadata=_engine_metadata(payload, started, default_process=UNKNOWN_PROCESS, default_outcome="unknown"),
                 error=classify_reasonix_failure(str(error), payload),
+            )
+        metadata = _engine_metadata(payload, started, default_process=UNKNOWN_PROCESS, default_outcome="partial")
+        if not worker_stop_confirmed(metadata):
+            message = "Reasonix returned a result without confirmed worker stop evidence."
+            return normalize_result(
+                task_id=task["task_id"], worker=worker, status="failed",
+                summary=message, started_at=started_at, raw_output=payload,
+                metadata=metadata,
+                error=worker_error("unknown", message, code="UNCONFIRMED_STOP", retryable=False),
             )
         worker_text = str(payload.get("reasonix", {}).get("result", "")).strip()
         if not worker_text:
@@ -210,16 +271,15 @@ class ReasonixAdapter:
                 task_id=task["task_id"], worker=worker, status="failed",
                 summary=message, started_at=started_at,
                 raw_output=payload, uncertainties=["The structured result was incomplete."],
-                metadata={"runtime_seconds": round(time.monotonic() - started, 3)},
+                metadata=_engine_metadata(payload, started, default_process=UNKNOWN_PROCESS, default_outcome="unknown"),
                 error=worker_error("unknown", message, code="EMPTY_RESULT", retryable=False),
             )
         reasonix_details = payload.get("reasonix") if isinstance(payload.get("reasonix"), dict) else {}
-        metadata = {
-            "runtime_seconds": round(time.monotonic() - started, 3),
+        metadata.update({
             "routing": payload.get("routing"),
             "cost": payload.get("cost_quote") or reasonix_details.get("cost_quote") or payload.get("total_cost_usd") or reasonix_details.get("total_cost_usd"),
             "usage": payload.get("usage") or reasonix_details.get("usage"),
-        }
+        })
         return normalize_result(
             task_id=task["task_id"], worker=worker, status="completed",
             summary=_summary(worker_text), findings=[worker_text], started_at=started_at,
