@@ -459,7 +459,7 @@ class TailnetConfigTests(unittest.TestCase):
         lock = rules["tailnet-lock"]
         self.assertEqual(lock["type"], "tailnet_lock")
         self.assertEqual(lock["hosts"], ["macbook"])
-        self.assertIs(lock["expect_enabled"], False)
+        self.assertIs(lock["expect_enabled"], True)  # the lock has been on since 2026-10-24
         self.assertEqual(lock["severity"], "critical")
         self.assertIn("Phase C", lock["_comment"])
 

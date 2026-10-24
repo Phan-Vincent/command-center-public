@@ -154,7 +154,7 @@
       { "id": "pokemon-source", "type": "pokemon_source", "min_attempts": 10, "min_rate": 0.10, "severity": "critical" },
       { "id": "pokemon-service", "type": "pokemon_service", "severity": "critical" },
       { "id": "pokemon-quiet", "type": "pokemon_quiet", "min_runs": 8, "severity": "warning" },
-      { "id": "tailnet-lock", "type": "tailnet_lock", "hosts": ["macbook"], "expect_enabled": false, "severity": "critical", "_comment": "set expect_enabled true after Phase C of homelab-ansible proposals/tailnet-lock" },
+      { "id": "tailnet-lock", "type": "tailnet_lock", "hosts": ["macbook"], "expect_enabled": true, "severity": "critical", "_comment": "Tailnet Lock on since 2026-10-24 (homelab-ansible proposals/tailnet-lock Phase C)" },
       { "id": "tailnet-locked-out", "type": "tailnet_locked_out", "hosts": ["macbook"], "severity": "warning" },
       { "id": "tailnet-key-expiry", "type": "tailnet_key_expiry", "hosts": ["macbook"], "days": 14, "severity": "warning" }
     ],
