@@ -95,6 +95,22 @@ class TailnetCollectTests(unittest.TestCase):
                          [["status", "--json"], ["lock", "status", "--json"]])
         self.assertTrue(all(c[1] == 10 for c in calls))
 
+    def test_tailscale_runs_as_the_cli_outside_a_shell(self):
+        # Under launchd the app-bundle binary otherwise starts as the GUI and prints no JSON.
+        seen = []
+        original = collector._sh
+
+        def fake(cmd, timeout=10, **kwargs):
+            seen.append(kwargs.get("env") or {})
+            return ""
+
+        collector._sh = fake
+        self.addCleanup(setattr, collector, "_sh", original)
+        collector._tailnet()
+        collector._tailscale_ip()
+        self.assertEqual(len(seen), 3)
+        self.assertTrue(all(env.get("TAILSCALE_BE_CLI") == "1" for env in seen))
+
     def test_lock_state_is_unknown_unless_the_client_runs(self):
         # A stopped or logged-out client may say Enabled: false; that must not read as "lock off".
         for backend in ("Stopped", "NeedsLogin", None):

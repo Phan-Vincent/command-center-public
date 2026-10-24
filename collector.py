@@ -97,12 +97,12 @@ def validate_config(cfg=None):
 # Local (macOS) collector
 # ---------------------------------------------------------------------------
 
-def _sh(cmd, timeout=10, shell=False):
+def _sh(cmd, timeout=10, shell=False, env=None):
     try:
         if shell:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, shell=True)
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, shell=True, env=env)
         else:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
         return r.stdout.strip()
     except Exception:
         return ""
@@ -213,8 +213,13 @@ def _tailscale_cli():
     return "tailscale" if shutil.which("tailscale") else TAILSCALE_APP
 
 
+# Outside a shell (launchd), the app-bundle binary starts as the GUI and prints an
+# error instead of answering; this makes it act as the CLI.
+TAILSCALE_ENV = {**os.environ, "TAILSCALE_BE_CLI": "1"}
+
+
 def _tailscale_ip():
-    out = _sh([_tailscale_cli(), "ip", "-4"])
+    out = _sh([_tailscale_cli(), "ip", "-4"], env=TAILSCALE_ENV)
     if re.match(r"^[\d.]+$", out.strip()):
         return out.strip()
     return None
@@ -224,7 +229,7 @@ def _tailscale_json(args):
     """Run one read-only Tailscale JSON command; return (object|None, error|None)."""
     label = " ".join(args)
     try:
-        out = _sh([_tailscale_cli()] + list(args), timeout=10)
+        out = _sh([_tailscale_cli()] + list(args), timeout=10, env=TAILSCALE_ENV)
     except Exception as e:  # noqa: BLE001 - collection must survive a broken CLI
         return None, f"tailscale {label} failed: {type(e).__name__}: {e}"
     if not isinstance(out, str) or not out.strip():
