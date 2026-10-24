@@ -148,14 +148,17 @@ class TaskStore:
                 pass
         return path
 
-    def external_prompt_path(self, task_id: str, attempt: int | None = None) -> Path | None:
+    def handoff_prompt_path(self, task_id: str, prefix: str, attempt: int | None = None) -> Path | None:
         self._check_id(task_id)
         artifact_dir = self.tasks_dir / task_id / "artifacts"
         if attempt is not None:
-            path = artifact_dir / f"{attempt:03d}-external_prompt.md"
+            path = artifact_dir / f"{attempt:03d}-{prefix}_prompt.md"
             return path if path.is_file() else None
-        paths = sorted(artifact_dir.glob("*-external_prompt.md"))
+        paths = sorted(artifact_dir.glob(f"*-{prefix}_prompt.md"))
         return paths[-1] if paths else None
+
+    def external_prompt_path(self, task_id: str, attempt: int | None = None) -> Path | None:
+        return self.handoff_prompt_path(task_id, "external", attempt)
 
     def latest_context(self, task_id: str) -> dict[str, Any] | None:
         self._check_id(task_id)

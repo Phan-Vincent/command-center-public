@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 from .adapters import AdapterRegistry, worker_stop_confirmed
 from .context import build_context_package
-from .models import RESULT_STATUSES, OrchestratorError, normalize_result, utc_now, worker_error
+from .models import BROWSER_HANDOFFS, RESULT_STATUSES, WORKERS, OrchestratorError, normalize_result, utc_now, worker_error
 from .router import route_task
 from .store import TaskStore
 
@@ -390,47 +390,53 @@ class Supervisor:
             self.store.log_event(task_id, "manually_completed", {"path": str(path)})
             return result
 
-    def import_external_response(self, task_id: str, response: str, *, source: str) -> dict[str, Any]:
-        if not response or not response.strip():
-            raise OrchestratorError("external ChatGPT response cannot be empty")
+    def import_handoff_response(self, task_id: str, response: str, *, source: str) -> dict[str, Any]:
+        """Import the answer pasted back from a browser-driven worker (external ChatGPT or Gemini)."""
         with self.store.task_lock(task_id):
             task = self.store.get(task_id)
-            if task.get("worker") != "external_chatgpt":
-                raise OrchestratorError("response import is only valid for a external_chatgpt handoff")
+            worker = task.get("worker")
+            spec = BROWSER_HANDOFFS.get(worker)
+            if spec is None:
+                raise OrchestratorError(
+                    f"response import is only valid for a {' or '.join(BROWSER_HANDOFFS)} handoff"
+                )
+            label, prefix = spec["label"], spec["artifact_prefix"]
+            if not response or not response.strip():
+                raise OrchestratorError(f"{label} response cannot be empty")
             if task["status"] != "waiting_for_user":
-                raise OrchestratorError(f"external response cannot be imported from {task['status']}")
+                raise OrchestratorError(f"{label} response cannot be imported from {task['status']}")
             attempt = task["attempt_count"]
             handoff = next(
                 (
                     record for record in reversed(self.store.results(task_id))
-                    if record.get("worker") == "external_chatgpt"
+                    if record.get("worker") == worker
                     and record.get("status") == "waiting_for_user"
                     and record.get("metadata", {}).get("execution_mode") == "manual_handoff"
                 ),
                 None,
             )
             if handoff is None:
-                raise OrchestratorError("external handoff result is missing")
-            prompt_path = self.store.external_prompt_path(task_id, attempt)
+                raise OrchestratorError(f"{label} handoff result is missing")
+            prompt_path = self.store.handoff_prompt_path(task_id, prefix, attempt)
             if prompt_path is None:
-                raise OrchestratorError("external prompt artifact is missing")
+                raise OrchestratorError(f"{label} prompt artifact is missing")
 
             imported_at = utc_now()
             response_path = self.store.save_text_artifact(
-                task_id, attempt, "external_response.txt", response,
+                task_id, attempt, f"{prefix}_response.txt", response,
             )
             compact = " ".join(response.strip().split())
             summary = compact[:700] + ("…" if len(compact) > 700 else "")
             result = normalize_result(
                 task_id=task_id,
-                worker="external_chatgpt",
+                worker=worker,
                 status="completed",
                 summary=summary,
                 findings=[response],
                 recommended_next_action="Supervisor should inspect the imported research and explicitly delegate any required repository work.",
                 artifacts=[
-                    {"type": "external_prompt", "path": str(prompt_path), "created_at": handoff.get("metadata", {}).get("handoff_created_at")},
-                    {"type": "external_response", "path": str(response_path), "created_at": imported_at},
+                    {"type": f"{prefix}_prompt", "path": str(prompt_path), "created_at": handoff.get("metadata", {}).get("handoff_created_at")},
+                    {"type": f"{prefix}_response", "path": str(response_path), "created_at": imported_at},
                 ],
                 confidence="manually_imported_unverified",
                 raw_output=response,
@@ -450,7 +456,7 @@ class Supervisor:
             task["result_path"] = str(path)
             task["error"] = None
             self.store.save(task)
-            self.store.log_event(task_id, "external_response_imported", {
+            self.store.log_event(task_id, f"{prefix}_response_imported", {
                 "attempt": attempt,
                 "path": str(path),
                 "response_path": str(response_path),
@@ -458,38 +464,44 @@ class Supervisor:
             })
             return result
 
+    # The external ChatGPT name predates Gemini; keep it for existing callers.
+    import_external_response = import_handoff_response
+
     def handoff(self, task_id: str) -> dict[str, Any]:
         task = self.store.get(task_id)
-        if task.get("worker") != "external_chatgpt":
-            raise OrchestratorError("task is not assigned to external_chatgpt")
-        prompt_path = self.store.external_prompt_path(task_id)
+        worker = task.get("worker")
+        spec = BROWSER_HANDOFFS.get(worker)
+        if spec is None:
+            raise OrchestratorError(f"task is not assigned to {' or '.join(BROWSER_HANDOFFS)}")
+        prompt_path = self.store.handoff_prompt_path(task_id, spec["artifact_prefix"])
         if prompt_path is None:
-            raise OrchestratorError("external prompt artifact has not been created; run the task first")
+            raise OrchestratorError(f"{spec['label']} prompt artifact has not been created; run the task first")
         return {
             "task_id": task_id,
-            "worker": "external_chatgpt",
+            "worker": worker,
             "objective": task["instructions"],
             "prompt_path": str(prompt_path),
             "status": task["status"],
+            "where": spec["where"],
+            "model_rule": spec["model_rule"],
             "next_command": f"./orchestrator complete {task_id} --stdin",
         }
 
     def stats(self) -> dict[str, Any]:
         tasks = self.store.list()
-        worker_tasks = {worker: 0 for worker in ("external_chatgpt", "reasonix_flash", "reasonix_pro", "codex", "local")}
+        worker_tasks = {worker: 0 for worker in WORKERS}
         worker_attempts = dict(worker_tasks)
         completed_without_codex = 0
         codex_escalations = 0
         flash_to_pro = 0
         external_failures_or_waits = 0
-        external_handoffs = 0
-        external_completed = 0
-        external_waiting = 0
-        external_escalated_afterward = 0
-        external_completed_without_codex = 0
+        handoff_stats = {
+            worker: {"handoffs": 0, "completed": 0, "waiting_for_user": 0, "escalated_afterward": 0, "completed_without_codex": 0}
+            for worker in BROWSER_HANDOFFS
+        }
         runtimes: list[float] = []
         successful_latencies = {worker: [] for worker in worker_tasks}
-        external_wait_seconds: list[float] = []
+        handoff_wait_seconds: dict[str, list[float]] = {worker: [] for worker in BROWSER_HANDOFFS}
         failure_counts: dict[str, int] = {}
         automatic_retries = 0
         routing_overrides = 0
@@ -497,6 +509,7 @@ class Supervisor:
             "reasonix_flash": {"initial_tasks": 0, "completed_directly": 0, "escalated_to_pro": 0, "escalated_to_codex": 0, "failed": 0},
             "reasonix_pro": {"initial_tasks": 0, "completed": 0, "escalated_to_codex": 0, "failed": 0},
             "external_chatgpt": {"initial_tasks": 0, "completed": 0, "escalated_to_reasonix": 0, "escalated_to_codex": 0, "failed_or_waiting": 0},
+            "gemini_app": {"initial_tasks": 0, "completed": 0, "escalated_to_reasonix": 0, "escalated_to_codex": 0, "failed_or_waiting": 0},
             "codex": {"initial_tasks": 0},
         }
         retries = 0
@@ -510,7 +523,7 @@ class Supervisor:
             transition_results = [
                 record for record in results
                 if not (
-                    record.get("worker") == "external_chatgpt"
+                    record.get("worker") in BROWSER_HANDOFFS
                     and record.get("status") == "completed"
                     and record.get("metadata", {}).get("execution_mode") == "manual_handoff"
                 )
@@ -536,7 +549,7 @@ class Supervisor:
                         routing_outcomes[first_worker]["completed"] += 1
                     if task["status"] == "failed":
                         routing_outcomes[first_worker]["failed"] += 1
-                elif first_worker == "external_chatgpt":
+                elif first_worker in BROWSER_HANDOFFS:
                     if task["status"] == "completed":
                         routing_outcomes[first_worker]["completed"] += 1
                     if any(worker in {"reasonix_flash", "reasonix_pro"} for worker in workers[1:]):
@@ -549,28 +562,29 @@ class Supervisor:
                 1 for record in self.store.routing_history(task["task_id"])
                 if isinstance(record.get("routing_override"), dict)
             )
-            external_handoff_indexes = [
-                index for index, record in enumerate(results)
-                if record.get("worker") == "external_chatgpt"
-                and record.get("status") == "waiting_for_user"
-                and record.get("metadata", {}).get("execution_mode") == "manual_handoff"
-            ]
-            external_import_indexes = [
-                index for index, record in enumerate(results)
-                if record.get("worker") == "external_chatgpt"
-                and record.get("status") == "completed"
-                and record.get("metadata", {}).get("execution_mode") == "manual_handoff"
-            ]
-            external_handoffs += len(external_handoff_indexes)
-            if external_import_indexes:
-                external_completed += 1
-                first_import = external_import_indexes[0]
-                if any(record.get("worker") != "external_chatgpt" for record in results[first_import + 1:]):
-                    external_escalated_afterward += 1
-                if task["status"] == "completed" and "codex" not in workers:
-                    external_completed_without_codex += 1
-            if task["status"] == "waiting_for_user" and task.get("worker") == "external_chatgpt":
-                external_waiting += 1
+            for handoff_worker, counts in handoff_stats.items():
+                handoff_indexes = [
+                    index for index, record in enumerate(results)
+                    if record.get("worker") == handoff_worker
+                    and record.get("status") == "waiting_for_user"
+                    and record.get("metadata", {}).get("execution_mode") == "manual_handoff"
+                ]
+                import_indexes = [
+                    index for index, record in enumerate(results)
+                    if record.get("worker") == handoff_worker
+                    and record.get("status") == "completed"
+                    and record.get("metadata", {}).get("execution_mode") == "manual_handoff"
+                ]
+                counts["handoffs"] += len(handoff_indexes)
+                if import_indexes:
+                    counts["completed"] += 1
+                    first_import = import_indexes[0]
+                    if any(record.get("worker") != handoff_worker for record in results[first_import + 1:]):
+                        counts["escalated_afterward"] += 1
+                    if task["status"] == "completed" and "codex" not in workers:
+                        counts["completed_without_codex"] += 1
+                if task["status"] == "waiting_for_user" and task.get("worker") == handoff_worker:
+                    counts["waiting_for_user"] += 1
             if task["status"] == "completed" and "codex" not in workers:
                 completed_without_codex += 1
             if "codex" in workers:
@@ -579,12 +593,12 @@ class Supervisor:
                 flash_to_pro += 1
             for record in results:
                 worker = record.get("worker")
-                is_external_import = (
-                    worker == "external_chatgpt"
+                is_handoff_import = (
+                    worker in BROWSER_HANDOFFS
                     and record.get("status") == "completed"
                     and record.get("metadata", {}).get("execution_mode") == "manual_handoff"
                 )
-                if worker in worker_attempts and not is_external_import:
+                if worker in worker_attempts and not is_handoff_import:
                     worker_attempts[worker] += 1
                 error = record.get("error")
                 if record.get("status") == "failed" and isinstance(error, dict):
@@ -607,13 +621,13 @@ class Supervisor:
                     runtimes.append(float(runtime))
                     if record.get("status") == "completed" and not execution_attempts and worker in successful_latencies:
                         successful_latencies[worker].append(float(runtime))
-                if is_external_import:
+                if is_handoff_import:
                     metadata = record.get("metadata", {})
                     start = metadata.get("handoff_created_at")
                     end = metadata.get("response_imported_at") or metadata.get("result_imported_at")
                     try:
                         if start and end:
-                            external_wait_seconds.append((datetime.fromisoformat(end.replace("Z", "+00:00")) - datetime.fromisoformat(start.replace("Z", "+00:00"))).total_seconds())
+                            handoff_wait_seconds[worker].append((datetime.fromisoformat(end.replace("Z", "+00:00")) - datetime.fromisoformat(start.replace("Z", "+00:00"))).total_seconds())
                     except (TypeError, ValueError):
                         pass
 
@@ -626,6 +640,13 @@ class Supervisor:
                     for key, value in values.items() if key != "initial_tasks"
                 }
             return enriched
+
+        def human_wait(worker: str) -> dict[str, Any]:
+            values = handoff_wait_seconds[worker]
+            return {
+                "completed_handoffs": len(values),
+                "median_seconds": round(statistics.median(values), 3) if values else None,
+            }
 
         latency_metrics = {}
         for worker, values in successful_latencies.items():
@@ -644,13 +665,8 @@ class Supervisor:
             "worker_attempts": worker_attempts,
             "flash_to_pro_escalations": flash_to_pro,
             "external_failures_or_waits": external_failures_or_waits,
-            "external_chatgpt": {
-                "handoffs": external_handoffs,
-                "completed": external_completed,
-                "waiting_for_user": external_waiting,
-                "escalated_afterward": external_escalated_afterward,
-                "completed_without_codex": external_completed_without_codex,
-            },
+            "external_chatgpt": handoff_stats["external_chatgpt"],
+            "gemini_app": handoff_stats["gemini_app"],
             "retries": retries,
             "automatic_reasonix_retries": automatic_retries,
             "failure_categories": failure_counts,
@@ -659,10 +675,8 @@ class Supervisor:
             "completed_without_codex_percentage": completed_percentage,
             "tasks_requiring_codex": codex_escalations,
             "worker_latency": latency_metrics,
-            "external_human_wait": {
-                "completed_handoffs": len(external_wait_seconds),
-                "median_seconds": round(statistics.median(external_wait_seconds), 3) if external_wait_seconds else None,
-            },
+            "external_human_wait": human_wait("external_chatgpt"),
+            "gemini_human_wait": human_wait("gemini_app"),
             "measured_runtime_seconds": round(sum(runtimes), 3),
             "measured_attempts": len(runtimes),
         }

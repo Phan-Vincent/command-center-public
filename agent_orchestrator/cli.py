@@ -10,7 +10,7 @@ import subprocess
 import sys
 from typing import Any
 
-from .models import OrchestratorError, PRIORITIES, STATUSES, WORKERS
+from .models import BROWSER_HANDOFFS, OrchestratorError, PRIORITIES, STATUSES, WORKERS
 from .store import TaskStore
 from .supervisor import Supervisor
 
@@ -47,7 +47,7 @@ def _print_handoff(info: dict[str, Any], *, copied: bool = False) -> None:
     if copied:
         print("Clipboard: prompt copied with pbcopy")
     print("\nNext:")
-    print("Submit the prompt in the logged-in external ChatGPT tab (GPT-6.1 Sol High or above, or Astra Medium/High).")
+    print(f"Submit the prompt in {info['where']} ({info['model_rule']}).")
     print("Then run:")
     print(f"\n{info['next_command']}")
 
@@ -182,7 +182,7 @@ def build_parser() -> argparse.ArgumentParser:
     result.add_argument("task_id")
     context = sub.add_parser("context", help="show the latest inspectable context package")
     context.add_argument("task_id")
-    handoff = sub.add_parser("handoff", help="show a external ChatGPT manual handoff")
+    handoff = sub.add_parser("handoff", help="show a external ChatGPT or Gemini manual handoff")
     handoff.add_argument("task_id")
     handoff.add_argument("--copy", action="store_true", help="copy the prompt with macOS pbcopy")
 
@@ -201,7 +201,7 @@ def build_parser() -> argparse.ArgumentParser:
     complete.add_argument("task_id")
     complete.add_argument("--summary")
     response = complete.add_mutually_exclusive_group()
-    response.add_argument("--stdin", action="store_true", help="read a external ChatGPT response until EOF")
+    response.add_argument("--stdin", action="store_true", help="read a external ChatGPT or Gemini response until EOF")
     response.add_argument("--file", "--result-file", dest="response_file", help="read the complete response from a file")
     return parser
 
@@ -224,7 +224,7 @@ def main(argv: list[str] | None = None) -> int:
                 _print_route_explanation(decision)
             result = supervisor.dispatch(task["task_id"], worker=args.worker)
             _print_retry_summary(result)
-            if result.get("worker") == "external_chatgpt" and result.get("status") == "waiting_for_user":
+            if result.get("worker") in BROWSER_HANDOFFS and result.get("status") == "waiting_for_user":
                 print()
                 _print_handoff(supervisor.handoff(task["task_id"]))
             else:
@@ -236,7 +236,7 @@ def main(argv: list[str] | None = None) -> int:
                 print()
             result = supervisor.dispatch(args.task_id, worker=args.worker)
             _print_retry_summary(result)
-            if result.get("worker") == "external_chatgpt" and result.get("status") == "waiting_for_user":
+            if result.get("worker") in BROWSER_HANDOFFS and result.get("status") == "waiting_for_user":
                 _print_handoff(supervisor.handoff(args.task_id))
             else:
                 _json(result)
@@ -247,7 +247,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "reroute":
             result = supervisor.reroute(args.task_id, args.worker, args.reason)
             _print_retry_summary(result)
-            if result.get("worker") == "external_chatgpt" and result.get("status") == "waiting_for_user":
+            if result.get("worker") in BROWSER_HANDOFFS and result.get("status") == "waiting_for_user":
                 _print_handoff(supervisor.handoff(args.task_id))
             else:
                 _json(result)
@@ -281,7 +281,7 @@ def main(argv: list[str] | None = None) -> int:
             _json(supervisor.stats())
         elif args.command == "complete":
             task = store.get(args.task_id)
-            if task.get("worker") == "external_chatgpt":
+            if task.get("worker") in BROWSER_HANDOFFS:
                 if args.stdin:
                     response_text = sys.stdin.read()
                     source = "stdin"
@@ -289,8 +289,8 @@ def main(argv: list[str] | None = None) -> int:
                     response_text = Path(args.response_file).read_text(encoding="utf-8", errors="replace")
                     source = "file"
                 else:
-                    raise OrchestratorError("external_chatgpt completion requires --stdin or --file")
-                _json(supervisor.import_external_response(args.task_id, response_text, source=source))
+                    raise OrchestratorError(f"{task['worker']} completion requires --stdin or --file")
+                _json(supervisor.import_handoff_response(args.task_id, response_text, source=source))
             else:
                 if not args.summary:
                     raise OrchestratorError("manual completion requires --summary")

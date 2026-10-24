@@ -17,7 +17,7 @@ from unittest import mock
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 
-from agent_orchestrator.adapters import AdapterRegistry, ReasonixAdapter, ExternalChatGPTAdapter, classify_reasonix_failure  # noqa: E402
+from agent_orchestrator.adapters import AdapterRegistry, GeminiAppAdapter, ReasonixAdapter, ExternalChatGPTAdapter, classify_reasonix_failure  # noqa: E402
 from agent_orchestrator.cli import main as cli_main  # noqa: E402
 from agent_orchestrator.context import build_context_package, external_prompt  # noqa: E402
 from agent_orchestrator.models import OrchestratorError, infer_requirements, normalize_result, utc_now, worker_error  # noqa: E402
@@ -113,6 +113,21 @@ class RouterTests(TempProjectTest):
                 task = self.create(instructions)
                 self.assertEqual(route_task(task)["worker"], expected)
 
+    def test_gemini_and_second_opinion_route_to_gemini_app(self):
+        cases = [
+            ("Get a Gemini Argon read on this migration plan", "auto", "gemini_app"),
+            ("Give me a second opinion on the retry design", "auto", "gemini_app"),
+            ("Critique this rollout plan", "plan_review", "gemini_app"),
+            ("Ask Gemini to implement the repository fix", "auto", "codex"),
+        ]
+        for instructions, task_type, expected in cases:
+            with self.subTest(instructions=instructions):
+                decision = route_task(self.create(instructions, task_type=task_type))
+                self.assertEqual(decision["worker"], expected)
+        decision = route_task(self.create("Second opinion on the cache design"))
+        self.assertEqual(decision["rule"], "gemini_second_opinion")
+        self.assertEqual(decision["potential_escalation"], ["reasonix_flash", "codex"])
+
     def test_explicit_override_wins(self):
         task = self.create("Research a document")
         decision = route_task(task, "reasonix_flash")
@@ -202,6 +217,21 @@ class AdapterTests(TempProjectTest):
         prompt = prompt_path.read_text(encoding="utf-8")
         self.assertIn("Name the source", prompt)
         self.assertIn("Response format", prompt)
+
+    def test_gemini_adapter_creates_argon_handoff(self):
+        task = self.create("Review this plan", acceptance_criteria=["Name the riskiest step"])
+        task["attempt_count"] = 1
+        result = GeminiAppAdapter(self.store).run(task, build_context_package(task))
+        self.assertEqual(result["worker"], "gemini_app")
+        self.assertEqual(result["status"], "waiting_for_user")
+        self.assertEqual(result["execution_mode"], "manual_handoff")
+        self.assertEqual(result["artifacts"][0]["type"], "gemini_prompt")
+        self.assertIn("4 Argon", result["recommended_next_action"])
+        self.assertIn("Medium or High", result["recommended_next_action"])
+        prompt_path = self.store.handoff_prompt_path(task["task_id"], "gemini", 1)
+        self.assertTrue(prompt_path.is_file())
+        self.assertIn("Name the riskiest step", prompt_path.read_text(encoding="utf-8"))
+        self.assertIsNone(self.store.external_prompt_path(task["task_id"], 1))
 
     def test_external_prompt_includes_file_excerpt(self):
         (self.project / "notes.txt").write_text("important evidence", encoding="utf-8")
@@ -722,6 +752,52 @@ class SupervisorTests(TempProjectTest):
         self.assertEqual(stats["routing_outcomes"]["external_chatgpt"]["initial_tasks"], 2)
         self.assertEqual(stats["routing_outcomes"]["external_chatgpt"]["escalated_to_reasonix"], 1)
 
+    def gemini_handoff(self):
+        supervisor = Supervisor(self.store)
+        task = self.create("Second opinion on the retry design", acceptance_criteria=["Name one risk"])
+        result = supervisor.dispatch(task["task_id"])
+        return supervisor, task, result
+
+    def test_gemini_handoff_import_and_metrics(self):
+        supervisor, task, handoff = self.gemini_handoff()
+        self.assertEqual(handoff["worker"], "gemini_app")
+        info = supervisor.handoff(task["task_id"])
+        self.assertEqual(info["worker"], "gemini_app")
+        self.assertIn("gemini.google.com", info["where"])
+        self.assertTrue(info["prompt_path"].endswith("-gemini_prompt.md"))
+
+        result = supervisor.import_handoff_response(task["task_id"], "Risk: unbounded retries.", source="stdin")
+        self.assertEqual(result["worker"], "gemini_app")
+        self.assertEqual([a["type"] for a in result["artifacts"]], ["gemini_prompt", "gemini_response"])
+        self.assertTrue(Path(result["artifacts"][1]["path"]).read_text(encoding="utf-8").startswith("Risk:"))
+        self.assertEqual(self.store.get(task["task_id"])["status"], "completed")
+
+        _, waiting_task, _ = self.external_handoff()
+        stats = supervisor.stats()
+        self.assertEqual(stats["gemini_app"]["handoffs"], 1)
+        self.assertEqual(stats["gemini_app"]["completed"], 1)
+        self.assertEqual(stats["gemini_app"]["completed_without_codex"], 1)
+        self.assertEqual(stats["worker_attempts"]["gemini_app"], 1)
+        self.assertEqual(stats["worker_tasks"]["gemini_app"], 1)
+        self.assertEqual(stats["routing_outcomes"]["gemini_app"]["completed"], 1)
+        self.assertEqual(stats["gemini_human_wait"]["completed_handoffs"], 1)
+        self.assertEqual(stats["external_chatgpt"]["handoffs"], 1)
+        self.assertEqual(stats["external_chatgpt"]["completed"], 0)
+        self.assertEqual(stats["external_human_wait"]["completed_handoffs"], 0)
+
+    def test_gemini_empty_response_is_rejected(self):
+        supervisor, task, _ = self.gemini_handoff()
+        with self.assertRaisesRegex(OrchestratorError, "Gemini response cannot be empty"):
+            supervisor.import_handoff_response(task["task_id"], " \n", source="stdin")
+        self.assertEqual(self.store.get(task["task_id"])["status"], "waiting_for_user")
+
+    def test_handoff_import_rejects_non_browser_worker(self):
+        supervisor = Supervisor(self.store, adapters=FakeRegistry(["completed"]))
+        task = self.create("Propose a helper", worker="reasonix_flash")
+        supervisor.dispatch(task["task_id"])
+        with self.assertRaisesRegex(OrchestratorError, "external_chatgpt or gemini_app"):
+            supervisor.import_handoff_response(task["task_id"], "answer", source="stdin")
+
     def test_stats_capture_flash_to_pro_and_retries(self):
         supervisor = Supervisor(self.store, FakeRegistry(["completed", "completed"]))
         task = self.create()
@@ -1014,6 +1090,31 @@ class CliTests(TempProjectTest):
         result = json.loads(output.getvalue())
         self.assertEqual(result["metadata"]["import_source"], "file")
         self.assertEqual(result["raw_output"], "External answer from file")
+
+    def test_gemini_run_prints_argon_handoff_and_imports_response(self):
+        cli_store = self.root / "cli-gemini"
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(cli_main([
+                "--store", str(cli_store), "create", "Review the rollout plan",
+                "--project", str(self.project), "--worker", "gemini_app",
+            ]), 0)
+        task_id = output.getvalue().strip()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(cli_main(["--store", str(cli_store), "run", task_id]), 0)
+        text = output.getvalue()
+        self.assertIn("Delegated to: gemini_app", text)
+        self.assertIn("gemini.google.com", text)
+        self.assertIn("4 Argon with Thinking level Medium or High", text)
+        self.assertNotIn("external ChatGPT", text)
+
+        output = io.StringIO()
+        with mock.patch("sys.stdin", io.StringIO("Argon answer")), contextlib.redirect_stdout(output):
+            self.assertEqual(cli_main(["--store", str(cli_store), "complete", task_id, "--stdin"]), 0)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["worker"], "gemini_app")
+        self.assertEqual(result["raw_output"], "Argon answer")
 
     def test_external_empty_stdin_returns_error(self):
         cli_store = self.root / "cli-empty"

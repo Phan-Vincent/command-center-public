@@ -13,6 +13,8 @@ EXTERNAL_RE = re.compile(
     r"architecture critique|test[- ]case ideation|first-pass analysis|non-repository review)\b",
     re.I,
 )
+GEMINI_RE = re.compile(r"\b(gemini|argon|second opinion)\b", re.I)
+GEMINI_TASK_TYPES = {"second_opinion", "plan_review"}
 PRO_RE = re.compile(
     r"\b(hard|difficult|complex|deep)\b.*\b(debug|reason|architect|analysis|design|plan)\b|"
     r"\b(root cause across|threat model|cross-system architecture)\b",
@@ -32,6 +34,7 @@ def _decision(
         "reasonix_flash": ["reasonix_pro", "codex"],
         "reasonix_pro": ["codex"],
         "external_chatgpt": ["reasonix_flash", "codex"],
+        "gemini_app": ["reasonix_flash", "codex"],
         "codex": [],
         "local": ["codex"],
     }[worker]
@@ -43,7 +46,7 @@ def _decision(
         "requirements_snapshot": requirements,
         "potential_escalation": escalation,
         "explicit_override": explicit,
-        "policy_version": "1.2",
+        "policy_version": "1.3",
     }
 
 
@@ -74,6 +77,14 @@ def route_task(
         if requirements["terminal"]:
             reasons.append("terminal=true; authoritative local execution is required")
         return _decision("codex", "authoritative_repo_or_runtime", requirements, reasons)
+
+    task_type = str(task.get("task_type", "auto")).lower().replace("-", "_")
+    text = f"{task_type} {task.get('instructions', '')}"
+    if task_type in GEMINI_TASK_TYPES or GEMINI_RE.search(text):
+        return _decision(
+            "gemini_app", "gemini_second_opinion", requirements,
+            ["task names Gemini/Argon or asks for a second opinion; a Gemini Argon handoff is preferred"],
+        )
     if requirements["human_account"]:
         return _decision(
             "external_chatgpt", "human_account_required", requirements,
@@ -87,8 +98,6 @@ def route_task(
             reasons.append("current_information=true; current-source access is required")
         return _decision("external_chatgpt", "connected_research", requirements, reasons)
 
-    task_type = str(task.get("task_type", "auto")).lower().replace("-", "_")
-    text = f"{task_type} {task.get('instructions', '')}"
     if task_type in {"research", "summary", "document_analysis", "brainstorm"} or EXTERNAL_RE.search(text):
         return _decision(
             "external_chatgpt", "read_only_research", requirements,

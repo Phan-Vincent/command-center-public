@@ -12,7 +12,7 @@ import time
 from typing import Any
 
 from .context import reasonix_contract, external_prompt
-from .models import FAILURE_CATEGORIES, normalize_result, utc_now, worker_error
+from .models import BROWSER_HANDOFFS, FAILURE_CATEGORIES, normalize_result, utc_now, worker_error
 
 
 def _summary(text: str, limit: int = 700) -> str:
@@ -288,24 +288,42 @@ class ReasonixAdapter:
         )
 
 
-class ExternalChatGPTAdapter:
-    def __init__(self, store: Any) -> None:
+class BrowserHandoffAdapter:
+    """Write the prompt for a worker the supervisor drives in a logged-in browser tab."""
+
+    worker = "external_chatgpt"
+
+    def __init__(self, store: Any, worker: str | None = None) -> None:
         self.store = store
+        if worker is not None:
+            self.worker = worker
+        if self.worker not in BROWSER_HANDOFFS:
+            raise ValueError(f"not a browser handoff worker: {self.worker}")
 
     def run(self, task: dict[str, Any], package: dict[str, Any]) -> dict[str, Any]:
+        spec = BROWSER_HANDOFFS[self.worker]
+        prefix = spec["artifact_prefix"]
         handoff_created_at = utc_now()
         prompt_path = self.store.save_text_artifact(
-            task["task_id"], task["attempt_count"], "external_prompt.md", external_prompt(package),
+            task["task_id"], task["attempt_count"], f"{prefix}_prompt.md", external_prompt(package),
         )
         return normalize_result(
-            task_id=task["task_id"], worker="external_chatgpt", status="waiting_for_user",
-            summary="External ChatGPT handoff is ready.", started_at=handoff_created_at,
-            artifacts=[{"type": "external_prompt", "path": str(prompt_path), "created_at": handoff_created_at}],
-            recommended_next_action=f"Submit {prompt_path} in the logged-in external ChatGPT tab (GPT-6.1 Sol High or above, or Astra Medium/High), then import the answer with ./orchestrator complete {task['task_id']} --stdin.",
-            uncertainties=["No external ChatGPT response has been imported yet."],
+            task_id=task["task_id"], worker=self.worker, status="waiting_for_user",
+            summary=f"{spec['label']} handoff is ready.", started_at=handoff_created_at,
+            artifacts=[{"type": f"{prefix}_prompt", "path": str(prompt_path), "created_at": handoff_created_at}],
+            recommended_next_action=f"Submit {prompt_path} in {spec['where']} ({spec['model_rule']}), then import the answer with ./orchestrator complete {task['task_id']} --stdin.",
+            uncertainties=[f"No {spec['label']} response has been imported yet."],
             metadata={"execution_mode": "manual_handoff", "handoff_created_at": handoff_created_at},
             execution_mode="manual_handoff",
         )
+
+
+class ExternalChatGPTAdapter(BrowserHandoffAdapter):
+    worker = "external_chatgpt"
+
+
+class GeminiAppAdapter(BrowserHandoffAdapter):
+    worker = "gemini_app"
 
 
 class ManualAdapter:
@@ -322,9 +340,17 @@ class ManualAdapter:
 
 
 class AdapterRegistry:
-    def __init__(self, store: Any, *, reasonix: ReasonixAdapter | None = None, external: ExternalChatGPTAdapter | None = None) -> None:
+    def __init__(
+        self,
+        store: Any,
+        *,
+        reasonix: ReasonixAdapter | None = None,
+        external: ExternalChatGPTAdapter | None = None,
+        gemini: GeminiAppAdapter | None = None,
+    ) -> None:
         self.reasonix = reasonix or ReasonixAdapter()
         self.external = external or ExternalChatGPTAdapter(store)
+        self.gemini = gemini or GeminiAppAdapter(store)
         self.manual = ManualAdapter()
 
     def dispatch(
@@ -339,4 +365,6 @@ class AdapterRegistry:
             return self.reasonix.run(task, package, worker, escalation_reason=escalation_reason)
         if worker == "external_chatgpt":
             return self.external.run(task, package)
+        if worker == "gemini_app":
+            return self.gemini.run(task, package)
         return self.manual.run(task, package, worker)

@@ -9,7 +9,23 @@ from uuid import uuid4
 
 
 SCHEMA_VERSION = 1
-WORKERS = ("external_chatgpt", "reasonix_flash", "reasonix_pro", "codex", "local")
+WORKERS = ("external_chatgpt", "gemini_app", "reasonix_flash", "reasonix_pro", "codex", "local")
+# Workers the supervisor drives in the user's logged-in browser tab: the
+# orchestrator writes a prompt file, waits, then imports the pasted answer.
+BROWSER_HANDOFFS = {
+    "external_chatgpt": {
+        "label": "external ChatGPT",
+        "artifact_prefix": "external",
+        "where": "the logged-in external ChatGPT tab",
+        "model_rule": "GPT-6.1 Sol High or above, or Astra Medium/High",
+    },
+    "gemini_app": {
+        "label": "Gemini",
+        "artifact_prefix": "gemini",
+        "where": "the logged-in gemini.google.com tab in Chrome",
+        "model_rule": "4 Argon with Thinking level Medium or High",
+    },
+}
 STATUSES = ("pending", "running", "waiting_for_user", "completed", "failed", "cancelled")
 RESULT_STATUSES = ("completed", "failed", "waiting_for_user", "cancelled")
 PRIORITIES = ("low", "normal", "high", "urgent")

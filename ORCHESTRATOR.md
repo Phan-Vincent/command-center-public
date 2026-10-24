@@ -11,6 +11,7 @@ Each worker assignment consumes one transition and exactly one worker attempt. T
 Workers have deliberately different trust boundaries:
 
 - `external_chatgpt`: a read-only external research worker in the user's external ChatGPT account. The CLI creates a complete prompt; the supervisor (Codex or Claude) submits it in the user's already logged-in ChatGPT browser tab, or the user does, and the response is imported.
+- `gemini_app`: a read-only reviewer and second opinion running Gemini 4 Argon in the user's Google account. The Gemini CLIs don't serve Argon on the user's Pro plan, so it works like `external_chatgpt`: the CLI writes a prompt, the supervisor submits it in the user's logged-in gemini.google.com tab in Chrome, and the response is imported.
 - `reasonix_flash`: default cheap reasoning and code proposals through the existing Reasonix stdio MCP server.
 - `reasonix_pro`: bounded high-complexity reasoning or an explicit escalation. Pro requires a recorded escalation reason.
 - `codex`: authoritative repository work, tests, debugging, Git, and final verification. The CLI produces a context handoff and waits; it never recursively launches Codex.
@@ -61,6 +62,7 @@ Explicit requirement flags override inference, including negative forms such as 
 Requirements are evaluated before task-type heuristics:
 
 - repository writes or terminal execution → `codex`
+- naming Gemini or Argon, asking for a second opinion, or `--type second_opinion` / `plan_review` → `gemini_app`
 - a human account → `external_chatgpt`
 - web/current research → `external_chatgpt`
 - clearly complex non-repository reasoning → `reasonix_pro`
@@ -177,6 +179,17 @@ Paste the response and finish input with the normal terminal EOF keystroke, or i
 
 The raw response is preserved both in the normalized result and as a text artifact. Provenance remains `worker: external_chatgpt` with `execution_mode: manual_handoff` (the stored name for a prompt-file handoff, whoever submits it). Importing the answer completes the existing attempt; it does not consume another worker transition or delegation-depth slot. The completed task may then be explicitly delegated to Reasonix or Codex if repository work is needed.
 
+## Gemini Argon handoff
+
+`gemini_app` uses the same handoff, `handoff`, and `complete --stdin`/`--file` commands. The user's Gemini 4 Argon access exists only in the Gemini apps: the `gemini` CLI no longer serves individual accounts, and Antigravity (`agy`) doesn't offer Argon on the Pro plan. The supervisor drives gemini.google.com in the user's logged-in Chrome (Claude in Chrome) rather than the native Gemini Mac app, because the page can be read directly instead of through screenshots.
+
+```bash
+./orchestrator ask "Second opinion on this migration plan" --file docs/plan.md
+./orchestrator create "Review the rollout plan" --worker gemini_app
+```
+
+The prompt is saved as `artifacts/NNN-gemini_prompt.md` and the imported answer as `NNN-gemini_response.txt`. Before each submit, the supervisor opens the mode picker, selects **4 Argon**, sets **Thinking level** to **Medium** or **High** (the page defaults to Low), and confirms both are visible. It uses High for hard reviews, starts a new chat for each task, and records the model and level. The Pro plan is generous, so Gemini can take a second opinion on any substantial plan or analysis, not only rare ones. It is advisory and read-only: its answer never authorizes repository writes, sends, or other actions.
+
 ## Recording Codex or manual completion
 
 When a task routes to `codex` or `local`, inspect the saved context package, perform the authoritative work separately, then record it:
@@ -191,7 +204,7 @@ Use `--result-file PATH` to retain a longer local report.
 
 Task states are `pending`, `running`, `waiting_for_user`, `completed`, `failed`, and `cancelled`. Writes use atomic replacement, events are append-only JSONL, and each attempt keeps its raw worker response. A context read, packaging, or persistence failure before dispatch is recorded as a failed result with `process.local_status: not_started` and diagnostic metadata; the worker is not launched and the task does not remain `running`. A cancellation always wins: a task cancelled during packaging or while a worker is running keeps the `cancelled` task state and stores a `cancelled` result rather than reporting the worker's late output as completed. `list`, `status`, `result`, and `context` make state inspectable; `retry` preserves prior attempts.
 
-`stats` retains the v1.1 totals and adds observed routing outcomes for initially selected Flash, Pro, external, and Codex tasks; direct completions; Flash → Pro; Flash → Codex; Pro → Codex; external → Reasonix/Codex; failures; routing overrides; structured failure categories; automatic retry counts (always zero under the one-attempt policy); and completed-without-Codex percentages. It also reports average and median successful automated latency by worker and separately labeled median human external-handoff wait time. It does not fabricate token, monetary, or time savings.
+`stats` retains the v1.1 totals and adds observed routing outcomes for initially selected Flash, Pro, external, Gemini, and Codex tasks; direct completions; Flash → Pro; Flash → Codex; Pro → Codex; external or Gemini → Reasonix/Codex; failures; routing overrides; structured failure categories; automatic retry counts (always zero under the one-attempt policy); and completed-without-Codex percentages. It also reports average and median successful automated latency by worker and separately labeled median human handoff wait times for external ChatGPT and Gemini (`external_human_wait`, `gemini_human_wait`). It does not fabricate token, monetary, or time savings.
 
 If a process is interrupted while a task is `running`, inspect its event log and result directory before changing the task. This v1 intentionally does not guess whether an external side effect occurred.
 
@@ -215,9 +228,9 @@ Add the worker name to the schema, implement a small adapter returning the norma
 ## Security assumptions and limitations
 
 - The canonical repository remains under Codex/local control.
-- Delegated Reasonix and external workers are read-only proposal generators.
+- Delegated Reasonix, external, and Gemini workers are read-only proposal generators.
 - Existing Reasonix provider configuration remains owned by Reasonix; this project never reads or copies it.
-- External ChatGPT authentication stays with the user. The supervisor may operate an already logged-in tab but never signs in or touches credentials.
+- External ChatGPT and Google/Gemini authentication stays with the user. The supervisor may operate an already logged-in tab but never signs in or touches credentials.
 - Runtime results can contain sensitive source context; protect `data/orchestrator/` like the repository itself.
 - v1 has local file locking and duplicate-state checks, not distributed leases or crash recovery.
 - The CLI includes no browser automation, scraping, cookie access, CAPTCHA handling, or credential storage; browser use belongs to the supervisor agent.
@@ -228,6 +241,6 @@ Add the worker name to the schema, implement a small adapter returning the norma
 - “Reasonix MCP server was not found”: set `REASONIX_MCP_SERVER` to the existing plugin server.
 - Reasonix failure or timeout: inspect the structured error, `outcome`, and `process` stop evidence. Each dispatch makes one attempt; there is no automatic retry or escalation. If the stop state is `unknown` or `running`, confirm the worker stopped before an explicit retry. Permanent failures stop immediately. Do not bypass permissions.
 - “Session is in use”: wait for the other bounded run to finish or close the duplicate Reasonix project window; do not stop the managed MCP tunnel.
-- External worker waits: run `handoff TASK_ID`, submit the prompt in the logged-in ChatGPT tab, then import the answer with `complete --stdin` or `complete --file`.
+- External or Gemini worker waits: run `handoff TASK_ID`, submit the prompt in the tab it names (ChatGPT, or gemini.google.com with 4 Argon at Medium/High), then import the answer with `complete --stdin` or `complete --file`.
 - Maximum depth reached: inspect the complete history; create a deliberate child task rather than silently extending an agent loop.
 - Malformed state: do not overwrite it. Preserve the JSON and event log for diagnosis.
