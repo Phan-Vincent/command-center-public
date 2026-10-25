@@ -1,6 +1,6 @@
 {
   "name": "deepseek-delegate",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Compatibility package with generated Reasonix core. Single-attempt delegation; no automatic Git mutations.",
   "author": {
     "name": "phan-vincent"

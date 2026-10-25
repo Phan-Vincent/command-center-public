@@ -1,14 +1,18 @@
 # Reasonix Orchestrator
 
-Version 0.2.0 consolidates the Reasonix and DeepSeek policies and execution
+Version 0.2.2 consolidates the Reasonix and DeepSeek policies and execution
 paths.
 
 The core skill routes substantial self-contained drafting/analysis to the
 external ChatGPT account when worthwhile, and bounded repository work to
 Reasonix. The supervisor (Codex or Claude) may drive the user's already
 logged-in ChatGPT tab directly; it never signs in or handles credentials.
-External submissions must visibly use GPT-6.1 Sol at High effort or above, Astra at
-Medium or High effort, or a stronger verified model.
+External submissions must visibly use GPT-6.1 Sol at High effort or above where
+offered, GPT-6 Astra at Medium or High effort in ChatGPT's Work mode, or a
+stronger verified model. The external account's Chat picker currently shows only
+GPT-5.6 Sol, which does not qualify; GPT-6 Astra in Work mode is the practical
+choice there. For Gemini second opinions, use the logged-in gemini.google.com
+tab with 4 Argon at Thinking level Medium or High.
 
 MCP exposes `probe`, `delegate_read`, and `delegate_write`. Write requests require
 exact `authorize_writes:true`; the human request supplies actual authorization.

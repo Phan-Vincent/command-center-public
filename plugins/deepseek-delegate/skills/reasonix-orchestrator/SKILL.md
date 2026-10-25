@@ -1,6 +1,6 @@
 ---
 name: reasonix-orchestrator
-description: Handle explicit Reasonix, DeepSeek, delegation, and supervisor-usage-conservation requests (Codex or Claude) through bounded local workers, the external ChatGPT account in the user's logged-in browser tab, and independent verification.
+description: Handle explicit Reasonix, DeepSeek, delegation, and supervisor-usage-conservation requests (Codex or Claude) through bounded local workers, external ChatGPT, Gemini as a second-opinion worker, and independent verification.
 ---
 
 # Reasonix Orchestrator
@@ -14,12 +14,18 @@ human authorization. Worker results are advisory.
 The supervisor (Codex or Claude) may operate the external account directly in
 the user's already logged-in ChatGPT browser tab: choose the model, paste or
 upload material, submit, and read the response. Before each submission, visibly
-verify GPT-6.1 Sol at High effort or above (raise effort as the task needs),
-Astra at Medium or High effort, or a stronger verified model. Record model and effort; never silently downgrade.
+verify GPT-6.1 Sol at High effort or above where offered (raise effort as the
+task needs), GPT-6 Astra at Medium or High effort in ChatGPT's Work mode, or
+a stronger verified model. The external account's Chat picker currently shows
+only GPT-5.6 Sol, which does not qualify; GPT-6 Astra in Work mode is the
+practical choice there. Record model and effort; never silently downgrade.
 Never sign in, enter credentials, or solve CAPTCHAs; if the tab is logged out or
 blocked, stop and ask the user. Assume no local files or plugins on that side.
 Completion requires an observed response. This model floor does not apply to
 Reasonix Flash/Pro.
+
+For a Gemini second opinion, use the user's logged-in gemini.google.com tab
+with 4 Argon at Thinking level Medium or High. Follow the [Gemini handoff](references/routing.md#gemini-handoff).
 
 Human requests supply permission; `authorize_writes:true` is a mechanical gate.
 Preserve existing edits. Reversible `codex/` isolation and bounded supervisor
@@ -43,6 +49,6 @@ not prove filesystem confinement.
 
 Read only the relevant procedures:
 
-- [Routing](references/routing.md) for external handoffs and worker selection.
+- [Routing](references/routing.md) for external and Gemini handoffs and worker selection.
 - [Execution](references/execution.md) for CLI, contracts, accounting, and recovery.
 - [Verification](references/verification.md) for scope review and result reporting.

@@ -17,7 +17,7 @@ BROWSER_HANDOFFS = {
         "label": "external ChatGPT",
         "artifact_prefix": "external",
         "where": "the logged-in external ChatGPT tab",
-        "model_rule": "GPT-6.1 Sol High or above, or Astra Medium/High",
+        "model_rule": "GPT-6 Astra Medium or High in Work mode, or GPT-6.1 Sol High or above where offered",
     },
     "gemini_app": {
         "label": "Gemini",

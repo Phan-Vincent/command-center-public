@@ -5,11 +5,11 @@
   "mcp/reasonix_verification.py": "db300ea10c9ef01e554b68712135862c5b7695005b8023538f4123771935dda2",
   "scripts/delegate.py": "1ad7597316aa97425c107526097632518b48bde526bc9adfdd1828f499680c28",
   "skills/deepseek-delegation/SKILL.md": "81e8dc00db06aa6437564e4d633ba0378112511db670e70e79ab82142781f032",
-  "skills/reasonix-orchestrator/SKILL.md": "673299aa6b07a13f5bfcae0d5976d37ccc7dde1d02763af224be672d4f320d32",
+  "skills/reasonix-orchestrator/SKILL.md": "421c3cfa14c80d2d50cc46e11eee34664d6c8446591b1659eb2a6d5e555d2b12",
   "skills/reasonix-orchestrator/agents/openai.yaml": "4499d9c69260de4aed819c76227ad895ff09981f901f6ba9f060e0db587ed631",
   "skills/reasonix-orchestrator/references/execution.md": "4e9591f1ac5797a1f653995c872f926b178cbaff6230403c215f60d595a90fd7",
   "skills/reasonix-orchestrator/references/operations.md": "afa7b0f872e200c50ab98e89c9ee625a398ff2e7398c37ed2befabc09bcf86c7",
-  "skills/reasonix-orchestrator/references/routing.md": "a1875eef96d276f75b44e848b6429e00fd44e708664e4c9e2c47842e750b752e",
+  "skills/reasonix-orchestrator/references/routing.md": "99ef74fa8de9aa0ad9832c83c9d1554589ae3bfc0228ec5765a61a63a8b0ae3d",
   "skills/reasonix-orchestrator/references/task-contract.md": "039c69f5847df3f533654c1fccde253870d735daacdec3462fe33a7f742c8e36",
   "skills/reasonix-orchestrator/references/verification.md": "c3f58f9af0fcab1ea64c772ac0537ca7230c9453ded05584598a04b55d01c1e6",
   "skills/reasonix-orchestrator/scripts/reasonix_delegate.py": "72ee785983cb13fedb01282013a1636e3ed2fe1988a51335f8fdeb5998d3f84b"
