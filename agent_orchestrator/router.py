@@ -13,7 +13,19 @@ EXTERNAL_RE = re.compile(
     r"architecture critique|test[- ]case ideation|first-pass analysis|non-repository review)\b",
     re.I,
 )
-GEMINI_RE = re.compile(r"\b(gemini|argon|second opinion)\b", re.I)
+# Require delegation wording; topic mentions alone do not select Gemini.
+GEMINI_AFFIRMATIVE_RE = re.compile(
+    r"\b(?:ask|use|using|have|via|through)\s+(?:gemini|argon)\b"
+    r"|\b(?:send|submit|route|delegate|hand)\b[^.;:!?,\n]*?\bto\s+(?:gemini|argon)\b"
+    r"|\bgemini\s+(?:4\s+)?argon\b",
+    re.I,
+)
+GEMINI_NEGATION_RE = re.compile(
+    r"\b(?:don['’]?t|do\s+not|does\s+not|did\s+not|never|not|without|avoid|no)\b"
+    r"[^.;:!?,\n]*?\b(?:gemini|argon)\b",
+    re.I,
+)
+SECOND_OPINION_RE = re.compile(r"\bsecond[\s-]+opinion\b", re.I)
 GEMINI_TASK_TYPES = {"second_opinion", "plan_review"}
 PRO_RE = re.compile(
     r"\b(hard|difficult|complex|deep)\b.*\b(debug|reason|architect|analysis|design|plan)\b|"
@@ -80,15 +92,16 @@ def route_task(
 
     task_type = str(task.get("task_type", "auto")).lower().replace("-", "_")
     text = f"{task_type} {task.get('instructions', '')}"
-    if task_type in GEMINI_TASK_TYPES or GEMINI_RE.search(text):
-        return _decision(
-            "gemini_app", "gemini_second_opinion", requirements,
-            ["task names Gemini/Argon or asks for a second opinion; a Gemini Argon handoff is preferred"],
-        )
+    gemini_vetoed = bool(GEMINI_NEGATION_RE.search(text))
     if requirements["human_account"]:
         return _decision(
             "external_chatgpt", "human_account_required", requirements,
             ["human_account=true; a external ChatGPT handoff is required"],
+        )
+    if GEMINI_AFFIRMATIVE_RE.search(text) and not gemini_vetoed:
+        return _decision(
+            "gemini_app", "gemini_requested", requirements,
+            ["an affirmative Gemini/Argon request was made; a Gemini Argon handoff is preferred"],
         )
     if requirements["web_research"] or requirements["current_information"]:
         reasons = []
@@ -98,6 +111,11 @@ def route_task(
             reasons.append("current_information=true; current-source access is required")
         return _decision("external_chatgpt", "connected_research", requirements, reasons)
 
+    if (task_type in GEMINI_TASK_TYPES or SECOND_OPINION_RE.search(text)) and not gemini_vetoed:
+        return _decision(
+            "gemini_app", "gemini_second_opinion", requirements,
+            ["task type or wording asks for a second opinion; a Gemini Argon handoff is preferred"],
+        )
     if task_type in {"research", "summary", "document_analysis", "brainstorm"} or EXTERNAL_RE.search(text):
         return _decision(
             "external_chatgpt", "read_only_research", requirements,

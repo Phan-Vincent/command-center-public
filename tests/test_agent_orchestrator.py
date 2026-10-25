@@ -42,6 +42,10 @@ class TempProjectTest(unittest.TestCase):
     def create(self, instructions="Routine analysis", **kwargs):
         return self.store.create(instructions, project=str(self.project), **kwargs)
 
+    def store_snapshot(self, root=None):
+        root = self.store.root if root is None else Path(root)
+        return {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
 
 class StoreAndSchemaTests(TempProjectTest):
     def test_task_creation_and_round_trip(self):
@@ -127,6 +131,111 @@ class RouterTests(TempProjectTest):
         decision = route_task(self.create("Second opinion on the cache design"))
         self.assertEqual(decision["rule"], "gemini_second_opinion")
         self.assertEqual(decision["potential_escalation"], ["reasonix_flash", "codex"])
+
+    def test_route_precedence_before_and_after_gemini(self):
+        cases = [
+            # Repository work and human accounts outrank a Gemini request.
+            ("Implement the fix, ask Gemini", "auto", "codex"),
+            ("Get a second opinion on this plan; use my external account", "auto", "external_chatgpt"),
+            # An affirmative request outranks web/current research.
+            ("Ask Gemini to research the latest pricing change", "auto", "gemini_app"),
+            # Web/current research outranks second-opinion wording.
+            ("Research the latest pricing and give me a second opinion", "auto", "external_chatgpt"),
+            # A bare topic word is not a request.
+            ("Summarize the supplied notes about argon gas", "summary", "external_chatgpt"),
+        ]
+        for instructions, task_type, expected in cases:
+            with self.subTest(instructions=instructions):
+                self.assertEqual(route_task(self.create(instructions, task_type=task_type))["worker"], expected)
+        self.assertEqual(
+            route_task(self.create("Ask Gemini to review the rollout plan"))["rule"],
+            "gemini_requested",
+        )
+        for requirement in ("human_account", "web_research", "current_information"):
+            for task_type in ("auto", "second_opinion", "plan_review"):
+                with self.subTest(requirement=requirement, task_type=task_type):
+                    task = self.create("second opinion on the plan", task_type=task_type,
+                                       requirements={requirement: True})
+                    self.assertEqual(route_task(task)["worker"], "external_chatgpt")
+        task = self.create("Ask Gemini for a review", requirements={"human_account": True})
+        self.assertEqual(route_task(task)["worker"], "external_chatgpt")
+
+    def test_gemini_affirmative_phrases(self):
+        phrases = [
+            "Ask Gemini to review the rollout",
+            "Use Gemini for a second look at the rollout",
+            "Have Argon review the rollout",
+            "Send this to Gemini for review",
+            "Share this via Gemini",
+            "Gemini 4 Argon: review the rollout",
+            "Gemini Argon: review the rollout",
+        ]
+        for instructions in phrases:
+            with self.subTest(instructions=instructions):
+                decision = route_task(self.create(instructions))
+                self.assertEqual(decision["worker"], "gemini_app")
+                self.assertEqual(decision["rule"], "gemini_requested")
+
+    def test_bare_gemini_or_argon_topic_words_do_not_select_gemini(self):
+        phrases = [
+            "Summarize the supplied notes about argon gas",
+            "Summarize the Gemini launch announcement",
+            "Use the supplied notes about argon gas to summarize the document",
+            "Ask about Gemini and summarize the document",
+        ]
+        for instructions in phrases:
+            with self.subTest(instructions=instructions):
+                self.assertEqual(route_task(self.create(instructions))["worker"], "external_chatgpt")
+
+    def test_second_opinion_spellings(self):
+        for instructions in (
+            "Give me a second opinion on the design",
+            "second-opinion on the design",
+            "second   opinion on the design",
+            "second\t\n opinion on the design",
+            "SECOND OPINION on the design",
+        ):
+            with self.subTest(instructions=instructions):
+                decision = route_task(self.create(instructions))
+                self.assertEqual((decision["worker"], decision["rule"]), ("gemini_app", "gemini_second_opinion"))
+        for task_type in ("second_opinion", "second-opinion", "plan_review"):
+            with self.subTest(task_type=task_type):
+                decision = route_task(self.create("Critique the rollout", task_type=task_type))
+                self.assertEqual((decision["worker"], decision["rule"]), ("gemini_app", "gemini_second_opinion"))
+
+    def test_gemini_negation_vetoes_every_automatic_gemini_route(self):
+        cases = [
+            "Do not use Gemini for this review",
+            "Do not use Gemini; summarize the document",
+            "Don't ask Argon; just give me a second opinion",
+            "Don’t use Gemini; ask Gemini for a review",
+            "Not Gemini for this review; use Argon",
+            "Never send this to Gemini",
+            "Without Gemini, give me a second opinion",
+            "Avoid Argon for this review",
+            "No Gemini; second opinion on the retry design",
+            "Do not use Gemini; ask Gemini to summarize the migration",
+            "Do not send this detailed and carefully annotated document to Gemini; ask Gemini for a review",
+            "Ask Gemini for a review; avoid Gemini for this task",
+        ]
+        for instructions in cases:
+            for task_type in ("auto", "second_opinion", "plan_review"):
+                with self.subTest(instructions=instructions, task_type=task_type):
+                    self.assertNotEqual(route_task(self.create(instructions, task_type=task_type))["worker"], "gemini_app")
+
+    def test_negation_does_not_leak_across_a_clause_boundary(self):
+        decision = route_task(self.create("Avoid code changes, but ask Gemini for a review"))
+        self.assertEqual(decision["worker"], "gemini_app")
+        self.assertEqual(decision["rule"], "gemini_requested")
+
+    def test_worker_overrides_beat_gemini_negation_and_requests(self):
+        negated = self.create("Do not use Gemini; summarize the document", worker="gemini_app")
+        self.assertEqual(route_task(negated)["rule"], "created_worker_override")
+        self.assertEqual(route_task(negated)["worker"], "gemini_app")
+        self.assertEqual(route_task(negated, "external_chatgpt")["rule"], "explicit_worker_override")
+        self.assertEqual(route_task(negated, "external_chatgpt")["worker"], "external_chatgpt")
+        requested = self.create("Ask Gemini to review the rollout", worker="reasonix_flash")
+        self.assertEqual(route_task(requested)["worker"], "reasonix_flash")
 
     def test_explicit_override_wins(self):
         task = self.create("Research a document")
@@ -396,6 +505,10 @@ class SupervisorTests(TempProjectTest):
         )
         result = supervisor.dispatch(task["task_id"], worker="external_chatgpt")
         return supervisor, task, result
+
+    def artifacts(self, task_id):
+        directory = self.store.tasks_dir / task_id / "artifacts"
+        return sorted(path.name for path in directory.glob("*")) if directory.is_dir() else []
 
     def test_dispatch_persists_context_result_and_state(self):
         fake = FakeRegistry()
@@ -726,6 +839,65 @@ class SupervisorTests(TempProjectTest):
         with self.assertRaises(OrchestratorError):
             supervisor.import_external_response(task["task_id"], "late answer", source="stdin")
 
+    def test_import_rejects_handoff_rerouted_to_gemini(self):
+        supervisor, task, _ = self.external_handoff()
+        supervisor.reroute(task["task_id"], "gemini_app", "Gemini second opinion is preferred")
+        before = self.store.get(task["task_id"])
+        before_artifacts = self.artifacts(task["task_id"])
+        before_results = self.store.results(task["task_id"])
+        before_store = self.store_snapshot()
+        self.assertEqual((before["worker"], before["attempt_count"]), ("gemini_app", 2))
+        with self.assertRaisesRegex(OrchestratorError, "handoff changed"):
+            supervisor.import_handoff_response(
+                task["task_id"], "external answer", source="stdin",
+                expected_worker="external_chatgpt",
+            )
+        self.assertEqual(self.store_snapshot(), before_store)
+        self.assertEqual(self.store.get(task["task_id"]), before)
+        self.assertEqual(self.artifacts(task["task_id"]), before_artifacts)
+        self.assertEqual(self.store.results(task["task_id"]), before_results)
+        self.assertFalse([name for name in before_artifacts if name.endswith("_response.txt")])
+
+    def test_import_rejects_stale_attempt_after_retry(self):
+        supervisor, task, _ = self.external_handoff()
+        retried = supervisor.dispatch(task["task_id"], retry=True)
+        self.assertEqual(retried["status"], "waiting_for_user")
+        before = self.store.get(task["task_id"])
+        before_store = self.store_snapshot()
+        with self.assertRaisesRegex(OrchestratorError, f"re-run handoff {task['task_id']}"):
+            supervisor.import_handoff_response(
+                task["task_id"], "stale answer", source="stdin",
+                expected_attempt=1,
+            )
+        self.assertEqual(self.store_snapshot(), before_store)
+        self.assertEqual(self.store.get(task["task_id"]), before)
+        self.assertNotIn("002-external_response.txt", self.artifacts(task["task_id"]))
+        result = supervisor.import_handoff_response(
+            task["task_id"], "current answer", source="stdin",
+            expected_worker="external_chatgpt", expected_attempt=2,
+        )
+        self.assertEqual(result["raw_output"], "current answer")
+        self.assertEqual(self.store.get(task["task_id"])["status"], "completed")
+        self.assertIn("002-external_response.txt", self.artifacts(task["task_id"]))
+
+    def test_external_wrapper_refuses_a_gemini_handoff(self):
+        supervisor, task, _ = self.gemini_handoff()
+        before = self.store.get(task["task_id"])
+        before_artifacts = self.artifacts(task["task_id"])
+        before_store = self.store_snapshot()
+        with self.assertRaisesRegex(OrchestratorError, "handoff changed"):
+            supervisor.import_external_response(task["task_id"], "gemini answer", source="stdin")
+        self.assertEqual(self.store_snapshot(), before_store)
+        self.assertEqual(self.store.get(task["task_id"]), before)
+        self.assertEqual(self.artifacts(task["task_id"]), before_artifacts)
+        self.assertNotIn("001-gemini_response.txt", before_artifacts)
+        result = supervisor.import_handoff_response(
+            task["task_id"], "gemini answer", source="stdin",
+            expected_worker="gemini_app", expected_attempt=1,
+        )
+        self.assertEqual(result["worker"], "gemini_app")
+        self.assertIn("001-gemini_response.txt", self.artifacts(task["task_id"]))
+
     def test_external_completion_can_continue_to_another_worker(self):
         supervisor, task, _ = self.external_handoff()
         supervisor.import_external_response(task["task_id"], "Feature Y requires API v3.", source="file")
@@ -934,6 +1106,46 @@ class RecoveryBoundaryTests(TempProjectTest):
 
 
 class CliTests(TempProjectTest):
+    @staticmethod
+    def import_spy(captured):
+        real_import = Supervisor.import_handoff_response
+
+        def spy(self, task_id, response, *, source, expected_worker=None, expected_attempt=None):
+            captured.update(
+                expected_worker=expected_worker, expected_attempt=expected_attempt, source=source,
+            )
+            return real_import(
+                self, task_id, response, source=source,
+                expected_worker=expected_worker, expected_attempt=expected_attempt,
+            )
+
+        return spy
+
+    def reroute_while_reading(self, cli_store, task_id, captured):
+        def reroute():
+            racing = Supervisor(TaskStore(cli_store))
+            racing.reroute(task_id, "gemini_app", "rerouted while the answer was pasted")
+            captured["store_snapshot"] = self.store_snapshot(cli_store)
+            return "Late external answer"
+        return reroute
+
+    def assert_rejected_race(self, cli_store, task_id, captured, rc, stderr):
+        self.assertEqual(rc, 2)
+        self.assertEqual((captured["expected_worker"], captured["expected_attempt"]), ("external_chatgpt", 1))
+        self.assertIn("handoff changed", stderr)
+        self.assertIn(f"re-run handoff {task_id}", stderr)
+        self.assertEqual(self.store_snapshot(cli_store), captured["store_snapshot"])
+        store = TaskStore(cli_store)
+        state = store.get(task_id)
+        self.assertEqual(
+            (state["worker"], state["status"], state["attempt_count"]),
+            ("gemini_app", "waiting_for_user", 2),
+        )
+        self.assertEqual(
+            [path.name for path in (store.tasks_dir / task_id / "artifacts").glob("*_response.txt")],
+            [],
+        )
+
     def create_cli_external_task(self, cli_store):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
@@ -1126,6 +1338,44 @@ class CliTests(TempProjectTest):
             rc = cli_main(["--store", str(cli_store), "complete", task_id, "--stdin"])
         self.assertEqual(rc, 2)
         self.assertIn("cannot be empty", stderr.getvalue())
+
+    def test_complete_stdin_binds_snapshot_and_rejects_reroute_race(self):
+        cli_store = self.root / "cli-stdin-race"
+        task_id = self.create_cli_external_task(cli_store)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli_main(["--store", str(cli_store), "run", task_id]), 0)
+        captured = {}
+        stderr = io.StringIO()
+        with mock.patch.object(Supervisor, "import_handoff_response", self.import_spy(captured)), \
+                mock.patch("sys.stdin.read", side_effect=self.reroute_while_reading(cli_store, task_id, captured)), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+            rc = cli_main(["--store", str(cli_store), "complete", task_id, "--stdin"])
+        self.assert_rejected_race(cli_store, task_id, captured, rc, stderr.getvalue())
+        self.assertEqual(captured["source"], "stdin")
+
+    def test_complete_file_binds_snapshot_and_rejects_reroute_race(self):
+        cli_store = self.root / "cli-file-race"
+        task_id = self.create_cli_external_task(cli_store)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli_main(["--store", str(cli_store), "run", task_id]), 0)
+        response = self.root / "late-response.txt"
+        response.write_text("Late external answer", encoding="utf-8")
+        captured = {}
+        reroute = self.reroute_while_reading(cli_store, task_id, captured)
+        original_read = Path.read_text
+
+        def racing_read(path, *args, **kwargs):
+            if Path(path).name == response.name:
+                reroute()
+            return original_read(path, *args, **kwargs)
+
+        stderr = io.StringIO()
+        with mock.patch.object(Supervisor, "import_handoff_response", self.import_spy(captured)), \
+                mock.patch.object(Path, "read_text", racing_read), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+            rc = cli_main(["--store", str(cli_store), "complete", task_id, "--file", str(response)])
+        self.assert_rejected_race(cli_store, task_id, captured, rc, stderr.getvalue())
+        self.assertEqual(captured["source"], "file")
 
 
 if __name__ == "__main__":

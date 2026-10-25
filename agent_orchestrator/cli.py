@@ -282,6 +282,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "complete":
             task = store.get(args.task_id)
             if task.get("worker") in BROWSER_HANDOFFS:
+                # Bind the import before a response read can block on user input.
+                expected_worker = task.get("worker")
+                expected_attempt = task["attempt_count"]
                 if args.stdin:
                     response_text = sys.stdin.read()
                     source = "stdin"
@@ -290,7 +293,10 @@ def main(argv: list[str] | None = None) -> int:
                     source = "file"
                 else:
                     raise OrchestratorError(f"{task['worker']} completion requires --stdin or --file")
-                _json(supervisor.import_handoff_response(args.task_id, response_text, source=source))
+                _json(supervisor.import_handoff_response(
+                    args.task_id, response_text, source=source,
+                    expected_worker=expected_worker, expected_attempt=expected_attempt,
+                ))
             else:
                 if not args.summary:
                     raise OrchestratorError("manual completion requires --summary")

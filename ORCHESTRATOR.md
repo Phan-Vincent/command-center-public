@@ -59,16 +59,18 @@ Explicit requirement flags override inference, including negative forms such as 
   --requires-repo-write --requires-terminal
 ```
 
-Requirements are evaluated before task-type heuristics:
+After explicit or created-worker overrides, requirements and wording are evaluated in this order:
 
 - repository writes or terminal execution → `codex`
-- naming Gemini or Argon, asking for a second opinion, or `--type second_opinion` / `plan_review` → `gemini_app`
 - a human account → `external_chatgpt`
+- an affirmative Gemini request → `gemini_app` (`gemini_requested`), even when the task also needs web/current research
 - web/current research → `external_chatgpt`
+- asking for a second opinion, or `--type second_opinion` / `plan_review` → `gemini_app` (`gemini_second_opinion`)
+- read-only research, summaries, document analysis, or brainstorming → `external_chatgpt`
 - clearly complex non-repository reasoning → `reasonix_pro`
 - routine reasoning and read-only code proposals → `reasonix_flash`
 
-Explicit worker selection still wins. Inspect and record a deterministic explanation without running the task:
+Affirmative Gemini wording includes `ask Gemini`, `use Gemini`, `have Argon`, `via Gemini`, `send this to Gemini`, `Gemini 4 Argon`, and `Gemini Argon`. A bare mention of Gemini or Argon is a topic, not a request: “Summarize the supplied notes about argon gas” stays with `external_chatgpt`. Second-opinion wording accepts `second opinion`, `second-opinion`, arbitrary whitespace between the words, and any case. A negation in the same punctuation-delimited clause — `don't`/`do not`, `never`, `not`, `without`, `avoid`, or `no` before Gemini/Argon — vetoes every automatic Gemini route, even when another clause asks for Gemini or the task type is `second_opinion`. Explicit worker or created-worker selection still wins. Inspect and record a deterministic explanation without running the task:
 
 ```bash
 ./orchestrator route TASK_ID
@@ -181,6 +183,8 @@ The raw response is preserved both in the normalized result and as a text artifa
 
 ## Gemini Argon handoff
 
+Automatic Gemini routing requires affirmative delegation wording such as `ask Gemini`, `use Gemini`, `have Argon`, `via Gemini`, `send this to Gemini`, `Gemini 4 Argon`, or `Gemini Argon`; bare topic mentions do not select it. Repository/terminal and human-account requirements come first. An affirmative request outranks web/current research, while a `second opinion`, `second-opinion`, or whitespace-separated variant (or `second_opinion` / `plan_review` task type) comes after web/current research. A same-clause negated Gemini/Argon mention vetoes both automatic Gemini rules; explicit worker overrides still win.
+
 `gemini_app` uses the same handoff, `handoff`, and `complete --stdin`/`--file` commands. The user's Gemini 4 Argon access exists only in the Gemini apps: the `gemini` CLI no longer serves individual accounts, and Antigravity (`agy`) doesn't offer Argon on the Pro plan. The supervisor drives gemini.google.com in the user's logged-in Chrome (Claude in Chrome) rather than the native Gemini Mac app, because the page can be read directly instead of through screenshots.
 
 ```bash
@@ -189,6 +193,8 @@ The raw response is preserved both in the normalized result and as a text artifa
 ```
 
 The prompt is saved as `artifacts/NNN-gemini_prompt.md` and the imported answer as `NNN-gemini_response.txt`. Before each submit, the supervisor opens the mode picker, selects **4 Argon**, sets **Thinking level** to **Medium** or **High** (the page defaults to Low), and confirms both are visible. It uses High for hard reviews, starts a new chat for each task, and records the model and level. The Pro plan is generous, so Gemini can take a second opinion on any substantial plan or analysis, not only rare ones. It is advisory and read-only: its answer never authorizes repository writes, sends, or other actions.
+
+`complete --stdin` and `complete --file` snapshot the worker and attempt count before reading the response and bind the import to them. If the handoff was rerouted or retried while the answer was being pasted, the import is rejected with a `handoff changed … re-run handoff TASK_ID` error before anything is written; no task state or artifact changes, so run `handoff TASK_ID` again and resubmit. `import_external_response` is a thin wrapper that requires `external_chatgpt`.
 
 ## Recording Codex or manual completion
 

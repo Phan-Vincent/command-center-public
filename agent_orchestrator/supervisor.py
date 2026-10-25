@@ -390,11 +390,32 @@ class Supervisor:
             self.store.log_event(task_id, "manually_completed", {"path": str(path)})
             return result
 
-    def import_handoff_response(self, task_id: str, response: str, *, source: str) -> dict[str, Any]:
-        """Import the answer pasted back from a browser-driven worker (external ChatGPT or Gemini)."""
+    def import_handoff_response(
+        self,
+        task_id: str,
+        response: str,
+        *,
+        source: str,
+        expected_worker: str | None = None,
+        expected_attempt: int | None = None,
+    ) -> dict[str, Any]:
+        """Import a browser worker's answer, optionally bound to the handoff the caller read."""
         with self.store.task_lock(task_id):
             task = self.store.get(task_id)
             worker = task.get("worker")
+            attempt = task["attempt_count"]
+            if (
+                (expected_worker is not None and worker != expected_worker)
+                or (expected_attempt is not None and attempt != expected_attempt)
+            ):
+                expected = (
+                    f"{expected_worker or worker} attempt "
+                    f"{attempt if expected_attempt is None else expected_attempt}"
+                )
+                raise OrchestratorError(
+                    f"handoff changed since it was read (expected {expected}, found {worker} attempt {attempt}); "
+                    f"re-run handoff {task_id}"
+                )
             spec = BROWSER_HANDOFFS.get(worker)
             if spec is None:
                 raise OrchestratorError(
@@ -405,7 +426,6 @@ class Supervisor:
                 raise OrchestratorError(f"{label} response cannot be empty")
             if task["status"] != "waiting_for_user":
                 raise OrchestratorError(f"{label} response cannot be imported from {task['status']}")
-            attempt = task["attempt_count"]
             handoff = next(
                 (
                     record for record in reversed(self.store.results(task_id))
@@ -464,8 +484,11 @@ class Supervisor:
             })
             return result
 
-    # The external ChatGPT name predates Gemini; keep it for existing callers.
-    import_external_response = import_handoff_response
+    def import_external_response(self, task_id: str, response: str, *, source: str) -> dict[str, Any]:
+        """Import a external ChatGPT answer, refusing a handoff that changed worker."""
+        return self.import_handoff_response(
+            task_id, response, source=source, expected_worker="external_chatgpt",
+        )
 
     def handoff(self, task_id: str) -> dict[str, Any]:
         task = self.store.get(task_id)
