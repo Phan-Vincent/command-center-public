@@ -262,13 +262,26 @@ def _locked_out_names(filtered):
     return names
 
 
-def _tailnet_device(node, is_self):
+def _tailnet_device_id(node, node_key=None):
+    """Prefer stable ids, then the peer map key or an inlined node key."""
+    for key in ("StableID", "ID"):
+        value = node.get(key)
+        if isinstance(value, str) and value:
+            return value
+    for value in (node_key, node.get("NodeKey"), node.get("PublicKey")):
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _tailnet_device(node, is_self, node_key=None):
     expiry = node.get("KeyExpiry")
     if not isinstance(expiry, str) or not expiry or expiry.startswith("0001-01-01"):
         expiry = None
     name = node.get("HostName")
     return {
         "name": name if isinstance(name, str) else None,
+        "id": _tailnet_device_id(node, node_key),
         "self": bool(is_self),
         "tagged": bool(node.get("Tags")),
         "key_expiry": expiry,
@@ -279,15 +292,18 @@ def _tailnet_devices(status):
     devices = []
     self_node = status.get("Self")
     if isinstance(self_node, dict):
-        devices.append(_tailnet_device(self_node, True))
+        # Self has no peer-dict key; its inlined public key is the node key.
+        node_key = self_node.get("NodeKey") or self_node.get("PublicKey")
+        devices.append(_tailnet_device(self_node, True, node_key=node_key))
     peers = status.get("Peer")
     if isinstance(peers, dict):
-        peers = peers.values()
-    elif not isinstance(peers, (list, tuple)):
-        peers = ()
-    for peer in peers:
-        if isinstance(peer, dict):
-            devices.append(_tailnet_device(peer, False))
+        for node_key, peer in peers.items():
+            if isinstance(peer, dict):
+                devices.append(_tailnet_device(peer, False, node_key=node_key))
+    elif isinstance(peers, (list, tuple)):
+        for peer in peers:
+            if isinstance(peer, dict):
+                devices.append(_tailnet_device(peer, False))
     return devices
 
 

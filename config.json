@@ -156,12 +156,13 @@
       { "id": "pokemon-quiet", "type": "pokemon_quiet", "min_runs": 8, "severity": "warning" },
       { "id": "tailnet-lock", "type": "tailnet_lock", "hosts": ["macbook"], "expect_enabled": true, "severity": "critical", "_comment": "Tailnet Lock on since 2026-10-24 (homelab-ansible proposals/tailnet-lock Phase C)" },
       { "id": "tailnet-locked-out", "type": "tailnet_locked_out", "hosts": ["macbook"], "severity": "warning" },
-      { "id": "tailnet-key-expiry", "type": "tailnet_key_expiry", "hosts": ["macbook"], "days": 14, "severity": "warning" }
+      { "id": "tailnet-key-expiry", "type": "tailnet_key_expiry", "hosts": ["macbook"], "days": 14, "severity": "warning" },
+      { "id": "tailnet-unreadable", "type": "tailnet_unknown", "hosts": ["macbook"], "severity": "warning" }
     ],
     "notify": { "min_active_seconds": 120, "state_file": "data/alert_state.json" },
     "webhooks": [
       { "id": "discord", "type": "discord", "url_file": "~/.config/command-center/discord-webhook",
-        "severities": ["critical"], "rules": ["pokemon-quiet", "home-internet", "tailnet-locked-out", "tailnet-key-expiry"] }
+        "severities": ["critical"], "rules": ["pokemon-quiet", "home-internet", "tailnet-locked-out", "tailnet-key-expiry", "tailnet-unreadable"] }
     ]
   },
   "home_internet": {

@@ -7,9 +7,10 @@ Notification lifecycle (per alert key = host|rule|subject, per webhook):
     (state persists to `notify.state_file`);
   * once it has been gone for `min_active_seconds`, send one RESOLVED message
     to every webhook that was told it fired. Alerts whose facts can't be
-    confirmed — the host is unreachable, or the snapshot is a stale
-    last-known-good copy — are held rather than resolved, and their recovery
-    debounce restarts once real facts are back;
+    confirmed — the host is unreachable, the snapshot is a stale
+    last-known-good copy, or the rule's own Tailscale half is missing — are
+    held rather than resolved, and their recovery debounce restarts once real
+    facts are back;
   * rules that read collected facts are only evaluated while those facts are
     current: an unreachable or stale host is `host`'s business alone;
   * failed sends are retried on later evaluations, after a short per-webhook
@@ -18,10 +19,11 @@ Notification lifecycle (per alert key = host|rule|subject, per webhook):
 A gap of more than `notify.max_sample_gap_seconds` since the previous
 evaluation means the MacBook was asleep. Its brief
 background wakes collect before Tailscale reconnects, so every host looks
-unreachable. Host and offline alerts therefore can't start in the first
-evaluation after a gap, and any not yet announced are dropped: their
-debounce has to run while the MacBook is awake and watching. Unannounced ones
-loaded from the state file when the server starts are dropped the same way.
+unreachable. Host, offline and tailnet-unreadable alerts therefore can't start
+in the first evaluation after a gap, and any not yet announced are dropped:
+their debounce has to run while the MacBook is awake and watching. Unannounced
+ones loaded from the state file when the server starts are dropped the same
+way.
 """
 
 import json
@@ -37,7 +39,8 @@ BASE = Path(__file__).resolve().parent
 RETRY_BACKOFF_SECONDS = 60
 RESOLVED_TTL_SECONDS = 24 * 3600  # give up on undeliverable recoveries after a day
 DEFAULT_MAX_SAMPLE_GAP_SECONDS = 120
-SLEEP_GUARDED_TYPES = ("host", "offline")  # judged from the MacBook's own connection
+SLEEP_GUARDED_TYPES = ("host", "offline", "tailnet_unknown")  # judged from the MacBook's own connection
+TAILNET_TYPES = ("tailnet_lock", "tailnet_locked_out", "tailnet_key_expiry", "tailnet_unknown")
 
 # key -> {"alert": {...}, "first_seen": epoch, "notified": [webhook ids], "missing_since"?: epoch}
 _STATE = {}
@@ -67,6 +70,30 @@ def _facts_unknown(h):
     must be held in that state, and recoveries can't be observed in it.
     """
     return not isinstance(h, dict) or not h.get("reachable") or bool(h.get("stale"))
+
+
+def _tailnet_facts_unknown(alert_type, tailnet):
+    """A fresh host can still lack the CLI facts needed to confirm recovery."""
+    if not isinstance(tailnet, dict):
+        return True
+    if alert_type == "tailnet_lock":
+        return tailnet.get("lock_enabled") is None
+    if alert_type == "tailnet_locked_out":
+        return (tailnet.get("lock_enabled") is not True
+                or tailnet.get("self_signed") is None)
+    if alert_type == "tailnet_key_expiry":
+        devices = tailnet.get("devices")
+        return not isinstance(devices, list) or not devices
+    return False
+
+
+def _alert_facts_unknown(alert, h):
+    """True when the facts behind one active alert are rule-specifically unknown."""
+    t = alert.get("type")
+    if t not in TAILNET_TYPES:
+        return False
+    h = h if isinstance(h, dict) else {}
+    return _tailnet_facts_unknown(t, h.get("tailnet"))
 
 
 def _str_list(value):
@@ -238,6 +265,22 @@ def _evaluate_host(host, h, rules, now=None):
                     alerts.append({"host": host, "rule": rule.get("id", "pokemon-service"),
                                    "severity": sev, "subject": component,
                                    "message": f"{host}: Pokémon {component} is {state or 'unknown'}"})
+        elif t == "tailnet_unknown":
+            tailnet = h.get("tailnet")
+            if not isinstance(tailnet, dict):
+                continue
+            problems = []
+            error = tailnet.get("error")
+            if isinstance(error, str) and error:
+                problems.append(error)
+            if tailnet.get("lock_enabled") is None:
+                problems.append("Tailnet Lock state is unknown")
+            if problems:
+                # No subject: changing error text must keep the same identity.
+                alerts.append({"host": host, "rule": rule.get("id", "tailnet-unknown"),
+                               "severity": sev,
+                               "message": f"{host}: tailnet facts unreadable "
+                                          f"({'; '.join(problems)})"})
         elif t == "tailnet_lock":
             tailnet = h.get("tailnet")
             if not isinstance(tailnet, dict):
@@ -287,12 +330,18 @@ def _evaluate_host(host, h, rules, now=None):
                 expires_at = expires.timestamp()
                 if expires_at > cutoff:
                     continue
+                expiry_date = expires.strftime("%Y-%m-%d")
+                # Old samples lack ids; a renewed expiry gets a new identity.
+                device_id = device.get("id")
+                if not isinstance(device_id, str) or not device_id:
+                    device_id = name
+                subject = f"{device_id}@{expiry_date}"
                 if expires_at < now:
-                    message = f"{name}'s Tailscale key expired {expires.strftime('%Y-%m-%d')}"
+                    message = f"{name}'s Tailscale key expired {expiry_date}"
                 else:
-                    message = f"{name}'s Tailscale key expires {expires.strftime('%Y-%m-%d')}"
+                    message = f"{name}'s Tailscale key expires {expiry_date}"
                 alerts.append({"host": host, "rule": rule.get("id", "tailnet-key-expiry"),
-                               "severity": sev, "subject": name, "message": message})
+                               "severity": sev, "subject": subject, "message": message})
         for a in alerts[first:]:
             a["type"] = t
     return alerts
@@ -405,10 +454,14 @@ def evaluate(status, cfg, now=None):
                 del _STATE[key]  # never announced, so nothing to resolve
                 continue
             alert = entry["alert"]
-            if alert.get("type") != "host" and _facts_unknown(hosts.get(alert.get("host"))):
-                # Can't confirm recovery while the host is unreachable or showing
-                # last-known-good facts: hold the alert and restart the recovery
-                # debounce from the next sample that can actually observe it.
+            h = hosts.get(alert.get("host"))
+            if alert.get("type") != "host" and (
+                    _facts_unknown(h) or _alert_facts_unknown(alert, h)):
+                # Can't confirm recovery while the host is unreachable, showing
+                # last-known-good facts, or missing just the facts this rule
+                # reads (e.g. `lock status` failed while status --json worked):
+                # hold the alert and restart the recovery debounce from the next
+                # sample that can actually observe it.
                 entry.pop("missing_since", None)
                 continue
             entry.setdefault("missing_since", now)

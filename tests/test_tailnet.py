@@ -3,19 +3,23 @@
 
 import json
 import sys
+import tempfile
 import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 
 import alerts  # noqa: E402
 import collector  # noqa: E402
+import notify  # noqa: E402
 
 
 NOW = 1_800_000_000  # fixed epoch for deterministic expiry tests
+T0 = float(NOW)  # notification lifecycle clock
 
 
 def iso(epoch):
@@ -84,10 +88,11 @@ class TailnetCollectTests(unittest.TestCase):
         self.assertIsNone(tailnet["self_signed"])
         self.assertEqual(tailnet["locked_out"], [])
         self.assertEqual(tailnet["devices"], [
-            {"name": "macbook", "self": True, "tagged": True,
+            {"name": "macbook", "id": None, "self": True, "tagged": True,
              "key_expiry": "2027-02-01T00:00:00Z"},
-            {"name": "hermes", "self": False, "tagged": False, "key_expiry": None},
-            {"name": "acer", "self": False, "tagged": True,
+            {"name": "hermes", "id": "nodekey:peer1", "self": False, "tagged": False,
+             "key_expiry": None},
+            {"name": "acer", "id": "nodekey:peer2", "self": False, "tagged": True,
              "key_expiry": "2027-03-01T00:00:00Z"},
         ])
         self.assertIsNone(tailnet["error"])
@@ -160,7 +165,7 @@ class TailnetCollectTests(unittest.TestCase):
         self.assertIsNone(tailnet["self_signed"])
         self.assertEqual(tailnet["locked_out"], [])
         self.assertEqual(tailnet["devices"], [
-            {"name": "macbook", "self": True, "tagged": False, "key_expiry": None},
+            {"name": "macbook", "id": None, "self": True, "tagged": False, "key_expiry": None},
         ])
         self.assertIsNone(tailnet["error"])
 
@@ -180,6 +185,39 @@ class TailnetCollectTests(unittest.TestCase):
             ]}), status_out="{}",
         )
         self.assertEqual(collector._tailnet()["locked_out"], ["hermes", "acer"])
+
+    def test_device_ids_prefer_stable_id_then_id_then_node_key(self):
+        self.patch_tailscale(
+            lock=json.dumps({"Enabled": False}),
+            status_out=json.dumps({
+                "Self": {"HostName": "macbook", "PublicKey": "nodekey:self"},
+                "Peer": {
+                    "nodekey:peer1": {"HostName": "phone", "StableID": "stable-a", "ID": "n1"},
+                    "nodekey:peer2": {"HostName": "phone", "ID": "n2"},
+                    "nodekey:peer3": {"HostName": "phone"},
+                    "nodekey:peer4": {"HostName": "phone", "NodeKey": "nodekey:field"},
+                },
+            }),
+        )
+        ids = [d["id"] for d in collector._tailnet()["devices"]]
+        self.assertEqual(ids, ["nodekey:self", "stable-a", "n2",
+                               "nodekey:peer3", "nodekey:peer4"])
+
+        # A Self object that only carries the older NodeKey spelling still identifies.
+        self.patch_tailscale(
+            lock=json.dumps({"Enabled": False}),
+            status_out=json.dumps({"Self": {"HostName": "macbook",
+                                            "NodeKey": "nodekey:self-field"}}),
+        )
+        self.assertEqual(collector._tailnet()["devices"][0]["id"], "nodekey:self-field")
+
+    def test_listed_peer_uses_its_node_key_field(self):
+        self.patch_tailscale(
+            lock=json.dumps({"Enabled": False}),
+            status_out=json.dumps({"Peer": [{"HostName": "phone",
+                                             "NodeKey": "nodekey:list"}]}),
+        )
+        self.assertEqual(collector._tailnet()["devices"][0]["id"], "nodekey:list")
 
     def test_cli_failure_preserves_devices(self):
         self.patch_tailscale(status_out=json.dumps({"Self": {"HostName": "macbook"}}))
@@ -341,18 +379,19 @@ class TailnetAlertTests(unittest.TestCase):
                 "hosts": ["macbook"], "days": 14, "severity": "warning"}
         expiring = NOW + 3 * 86400
         tailnet = {"devices": [
-            {"name": "macbook", "self": True, "tagged": False,
+            {"name": "macbook", "id": "stable-macbook", "self": True, "tagged": False,
              "key_expiry": iso(expiring)},
-            {"name": "hermes", "self": False, "tagged": False,
+            {"name": "hermes", "id": "stable-hermes", "self": False, "tagged": False,
              "key_expiry": iso(NOW + 30 * 86400)},
-            {"name": "acer", "self": False, "tagged": False, "key_expiry": None},
+            {"name": "acer", "id": "stable-acer", "self": False, "tagged": False,
+             "key_expiry": None},
             {"name": "bad", "self": False, "tagged": False, "key_expiry": "not-a-date"},
             {"name": "zero", "self": False, "tagged": False,
              "key_expiry": "0001-01-01T00:00:00Z"},
         ]}
         found = alerts.evaluate(status(tailnet), cfg(rule), now=NOW)
         self.assertEqual(len(found), 1)
-        self.assertEqual(found[0]["subject"], "macbook")
+        self.assertEqual(found[0]["subject"], f"stable-macbook@{date(expiring)}")
         self.assertEqual(found[0]["rule"], "tailnet-key-expiry")
         self.assertEqual(found[0]["message"],
                          f"macbook's Tailscale key expires {date(expiring)}")
@@ -399,6 +438,7 @@ class TailnetAlertTests(unittest.TestCase):
 
         first = alerts.evaluate(status(tailnet), rule, now=NOW)[0]
         later = alerts.evaluate(status(tailnet), rule, now=NOW + 3600)[0]
+        self.assertEqual(first["subject"], f"macbook@{date(expires)}")  # no id: old samples
         self.assertEqual(first["key"], later["key"])
         self.assertEqual(first["message"], later["message"])
         self.assertEqual(first["since"], later["since"])
@@ -406,6 +446,77 @@ class TailnetAlertTests(unittest.TestCase):
         after = alerts.evaluate(status(tailnet), rule, now=expires + 1)[0]
         self.assertEqual(after["key"], first["key"])
         self.assertEqual(after["message"], f"macbook's Tailscale key expired {date(expires)}")
+
+    def test_two_phones_with_different_ids_are_two_expiry_alerts(self):
+        expires = NOW + 3 * 86400
+        tailnet = {"devices": [
+            {"name": "phone", "id": "stable-a", "key_expiry": iso(expires)},
+            {"name": "phone", "id": "stable-b", "key_expiry": iso(expires)},
+        ]}
+        found = alerts.evaluate(
+            status(tailnet),
+            cfg({"id": "tailnet-key-expiry", "type": "tailnet_key_expiry",
+                 "hosts": ["macbook"], "days": 14}),
+            now=NOW,
+        )
+        self.assertEqual(len(found), 2)
+        self.assertEqual([a["subject"] for a in found],
+                         [f"stable-a@{date(expires)}", f"stable-b@{date(expires)}"])
+        self.assertEqual([a["message"] for a in found],
+                         [f"phone's Tailscale key expires {date(expires)}"] * 2)
+        self.assertEqual(len({a["key"] for a in found}), 2)
+
+    def test_key_renewal_changes_the_alert_identity(self):
+        rule = cfg({"id": "tailnet-key-expiry", "type": "tailnet_key_expiry",
+                    "hosts": ["macbook"], "days": 14})
+
+        def sample(days):
+            return status({"devices": [{"name": "macbook", "id": "stable-1",
+                                        "key_expiry": iso(NOW + days * 86400)}]})
+
+        first = alerts.evaluate(sample(2), rule, now=NOW)[0]
+        renewed = alerts.evaluate(sample(9), rule, now=NOW + 15)[0]
+        self.assertNotEqual(first["key"], renewed["key"])
+        self.assertNotEqual(first["subject"], renewed["subject"])
+        self.assertEqual(renewed["subject"], f"stable-1@{date(NOW + 9 * 86400)}")
+
+    def test_tailnet_unknown_fires_on_error_and_unknown_lock(self):
+        rule = cfg({"id": "tailnet-unreadable", "type": "tailnet_unknown",
+                    "hosts": ["macbook"], "severity": "warning"})
+
+        found = alerts.evaluate(
+            status({"error": "tailscale lock status --json failed", "lock_enabled": True}),
+            rule, now=NOW,
+        )
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["rule"], "tailnet-unreadable")
+        self.assertEqual(found[0]["type"], "tailnet_unknown")
+        self.assertEqual(found[0]["severity"], "warning")
+        self.assertIn("lock status --json failed", found[0]["message"])
+        self.assertNotIn("subject", found[0], "identity must not depend on the error text")
+
+        found = alerts.evaluate(status({"error": None, "lock_enabled": None}),
+                                rule, now=NOW)
+        self.assertEqual(len(found), 1)
+        self.assertIn("Tailnet Lock state is unknown", found[0]["message"])
+
+        self.assertEqual(
+            alerts.evaluate(status({"error": None, "lock_enabled": True}), rule, now=NOW),
+            [],
+        )
+
+    def test_tailnet_unknown_is_suppressed_by_stale_or_unreachable_facts(self):
+        rule = cfg({"id": "tailnet-unreadable", "type": "tailnet_unknown",
+                    "hosts": ["macbook"], "severity": "warning"})
+        for reachable, stale in ((False, False), (True, True)):
+            self.assertEqual(
+                alerts.evaluate(
+                    status({"error": "boom", "lock_enabled": None},
+                           reachable=reachable, stale=stale),
+                    rule, now=NOW,
+                ),
+                [],
+            )
 
     def test_rules_ignore_non_dict_tailnet(self):
         rules = cfg(
@@ -435,13 +546,13 @@ class TailnetAlertTests(unittest.TestCase):
             )
 
     def test_evaluate_host_defaults_now_to_time_time(self):
-        expiry = iso(time.time() + 86400)
+        expiry_epoch = time.time() + 86400
         h = {"reachable": True,
-             "tailnet": {"devices": [{"name": "macbook", "key_expiry": expiry}]}}
+             "tailnet": {"devices": [{"name": "macbook", "key_expiry": iso(expiry_epoch)}]}}
         found = alerts._evaluate_host(
             "macbook", h, [{"id": "tailnet-key-expiry", "type": "tailnet_key_expiry"}])
         self.assertEqual(len(found), 1)
-        self.assertEqual(found[0]["subject"], "macbook")
+        self.assertEqual(found[0]["subject"], f"macbook@{date(expiry_epoch)}")
 
     def test_rule_hosts_filter_keeps_rules_macbook_only(self):
         rule = {"id": "tailnet-lock", "type": "tailnet_lock",
@@ -452,8 +563,144 @@ class TailnetAlertTests(unittest.TestCase):
         self.assertEqual(alerts.evaluate(other, cfg(rule), now=NOW), [])
 
 
+class TailnetNotificationTests(unittest.TestCase):
+    """Fire -> rule-specific facts unknown (hold) -> observed recovery."""
+
+    RULE_LOCK = {"id": "tailnet-lock", "type": "tailnet_lock",
+                 "hosts": ["macbook"], "expect_enabled": True}
+    RULE_LOCKED_OUT = {"id": "tailnet-locked-out", "type": "tailnet_locked_out",
+                       "hosts": ["macbook"]}
+    RULE_EXPIRY = {"id": "tailnet-key-expiry", "type": "tailnet_key_expiry",
+                   "hosts": ["macbook"], "days": 14}
+    RULE_UNKNOWN = {"id": "tailnet-unreadable", "type": "tailnet_unknown",
+                    "hosts": ["macbook"]}
+
+    def setUp(self):
+        alerts.reset_state()
+        self.addCleanup(alerts.reset_state)
+        self.sent = []
+        patcher = mock.patch.object(notify, "send", side_effect=self._send)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.state_file = Path(self.tmp.name) / "alert_state.json"
+
+    def _send(self, wh, text, timeout=5):
+        self.sent.append(text)
+        return True
+
+    def config(self, *rules, debounce=120):
+        return {"alerts": {
+            "rules": list(rules),
+            "notify": {"min_active_seconds": debounce,
+                       "max_sample_gap_seconds": 120,
+                       "state_file": str(self.state_file)},
+            "webhooks": [{"id": "discord", "type": "discord", "url": "http://unused"}],
+        }}
+
+    def run_evals(self, st, cfg, start, count, step=15):
+        for i in range(count):
+            alerts.evaluate(st, cfg, now=start + i * step)
+
+    @staticmethod
+    def healthy(*devices):
+        return status({"lock_enabled": True, "self_signed": True,
+                       "locked_out": [], "devices": list(devices)})
+
+    def assert_held_then_resolved(self, rule, firing, unknown, healthy=None):
+        cfg = self.config(rule)
+        self.run_evals(firing, cfg, T0, 10)  # fires at T0+120
+        self.assertEqual(len(self.sent), 1)
+
+        self.run_evals(unknown, cfg, T0 + 150, 30)  # five minutes unobservable
+        self.assertEqual(len(self.sent), 1, "unobservable facts must not resolve")
+
+        recovered = healthy if healthy is not None else self.healthy()
+        self.run_evals(recovered, cfg, T0 + 600, 8)
+        self.assertEqual(len(self.sent), 1, "recovery must wait the full debounce")
+        alerts.evaluate(recovered, cfg, now=T0 + 720)
+        self.assertEqual(len(self.sent), 2)
+        self.assertIn("RESOLVED", self.sent[1])
+
+    def test_lock_off_holds_while_lock_fact_unknown_then_resolves(self):
+        off = status({"lock_enabled": False, "self_signed": None,
+                      "locked_out": [], "devices": []})
+        unknown = status({"lock_enabled": None, "self_signed": None,
+                          "locked_out": [], "devices": [], "error": "lock status failed"})
+        self.assert_held_then_resolved(self.RULE_LOCK, off, unknown)
+        self.assertIn("Tailnet Lock is off", self.sent[1])
+
+    def test_unknown_facts_restart_the_recovery_debounce(self):
+        cfg = self.config(self.RULE_LOCK)
+        off = status({"lock_enabled": False, "self_signed": None,
+                      "locked_out": [], "devices": []})
+        unknown = status({"lock_enabled": None, "self_signed": None,
+                          "locked_out": [], "devices": []})
+        self.run_evals(off, cfg, T0, 10)
+        self.assertEqual(len(self.sent), 1)
+
+        self.run_evals(self.healthy(), cfg, T0 + 150, 5)  # 60 s observed clean
+        self.run_evals(unknown, cfg, T0 + 225, 1)         # not observable again
+        self.run_evals(self.healthy(), cfg, T0 + 240, 5)  # 60 s more: under debounce
+        self.assertEqual(len(self.sent), 1)
+        self.run_evals(self.healthy(), cfg, T0 + 315, 5)  # full 120 s, then resolve
+        self.assertEqual(len(self.sent), 2)
+
+    def test_locked_out_holds_when_lock_state_is_unknown(self):
+        firing = status({"lock_enabled": True, "self_signed": True,
+                         "locked_out": ["hermes"], "devices": []})
+        unknown = status({"lock_enabled": None, "self_signed": None,
+                          "locked_out": [], "devices": []})
+        self.assert_held_then_resolved(self.RULE_LOCKED_OUT, firing, unknown)
+
+    def test_locked_out_holds_when_self_signature_is_unknown(self):
+        firing = status({"lock_enabled": True, "self_signed": True,
+                         "locked_out": ["hermes"], "devices": []})
+        unknown = status({"lock_enabled": True, "self_signed": None,
+                          "locked_out": [], "devices": []})
+        self.assert_held_then_resolved(self.RULE_LOCKED_OUT, firing, unknown)
+
+    def test_expiry_holds_when_the_device_list_is_unreadable(self):
+        firing = status({"devices": [{"name": "macbook", "id": "stable-1",
+                                      "key_expiry": iso(T0 + 2 * 86400)}]})
+        # Collection failed after status --json: an error with no devices.
+        unreadable = status({"devices": [], "lock_enabled": None,
+                             "error": "tailscale status --json failed"})
+        healthy = self.healthy({"name": "macbook", "id": "stable-1",
+                                "key_expiry": iso(T0 + 30 * 86400)})
+        self.assert_held_then_resolved(self.RULE_EXPIRY, firing, unreadable, healthy)
+
+    def test_tailnet_unknown_waits_out_a_sleep_gap(self):
+        cfg = self.config(self.RULE_UNKNOWN)
+        healthy = status({"error": None, "lock_enabled": True})
+        broken = status({"error": "tailscale status --json failed",
+                         "lock_enabled": None})
+        self.run_evals(healthy, cfg, T0, 4)
+        self.run_evals(broken, cfg, T0 + 900, 1)  # first sample after waking: dropped
+        self.assertEqual(self.sent, [])
+        self.run_evals(broken, cfg, T0 + 915, 1)   # debounce starts on this sample
+        self.run_evals(broken, cfg, T0 + 1020, 1)  # 120 s after waking, 105 s watched
+        self.assertEqual(self.sent, [])
+        self.run_evals(broken, cfg, T0 + 1035, 1)  # 120 s watched since waking
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("tailnet facts unreadable", self.sent[0])
+
+    def test_tailnet_unknown_identity_is_stable_when_the_error_changes(self):
+        cfg = self.config(self.RULE_UNKNOWN, debounce=0)
+        first = alerts.evaluate(status({"error": "one", "lock_enabled": None}),
+                                cfg, now=T0)
+        self.assertEqual(len(self.sent), 1)
+        second = alerts.evaluate(status({"error": "two", "lock_enabled": None}),
+                                 cfg, now=T0 + 15)
+        self.assertEqual(len(self.sent), 1, "same unreadable tailnet, no second alert")
+        self.assertEqual(first[0]["key"], second[0]["key"])
+        self.assertEqual(first[0]["since"], second[0]["since"])
+        self.assertIn("two", second[0]["message"])
+
+
 class TailnetConfigTests(unittest.TestCase):
-    def test_three_rules_configured_for_macbook(self):
+    def test_four_rules_configured_for_macbook(self):
         rules = {r["id"]: r for r in collector.load_config()["alerts"]["rules"]}
 
         lock = rules["tailnet-lock"]
@@ -474,11 +721,17 @@ class TailnetConfigTests(unittest.TestCase):
         self.assertEqual(expiry["days"], 14)
         self.assertEqual(expiry["severity"], "warning")
 
-    def test_webhook_carries_locked_out_and_expiry(self):
+        unreadable = rules["tailnet-unreadable"]
+        self.assertEqual(unreadable["type"], "tailnet_unknown")
+        self.assertEqual(unreadable["hosts"], ["macbook"])
+        self.assertEqual(unreadable["severity"], "warning")
+
+    def test_webhook_carries_tailnet_warnings(self):
         webhooks = collector.load_config()["alerts"]["webhooks"]
         rules = webhooks[0]["rules"]
         self.assertIn("tailnet-locked-out", rules)
         self.assertIn("tailnet-key-expiry", rules)
+        self.assertIn("tailnet-unreadable", rules)
 
     def test_validate_config_passes(self):
         self.assertEqual(collector.validate_config(), [])
