@@ -46,8 +46,11 @@ HOST_EXTRAS = {
 }
 
 UNIT_FILTER = re.compile(
-    r"(hermes|ngrok|discord|bezos|kimi|restic|kalshi|crypto|openclaw)", re.IGNORECASE
+    r"(hermes|ngrok|discord|bezos|kimi|restic|kalshi|crypto|openclaw|homelab)", re.IGNORECASE
 )
+# The off-site copies (restic-b2-copy, restic-append-*, restic-wekan) and homelab-container-status
+# run as system units, which `systemctl --user` never lists; reading them needs no root.
+SYSTEM_UNIT_FILTER = re.compile(r"^(restic|homelab)-", re.IGNORECASE)
 
 PROC_MATCHES = [
     "hermes_cli.main gateway",
@@ -191,9 +194,8 @@ def path_check():
             for name, ip in hops.items()}
 
 
-def systemd_units():
+def _list_units(out, pattern, scope):
     units = []
-    out = sh("systemctl --user list-units --all --no-legend --type=service,timer 2>/dev/null")
     for raw in out.splitlines():
         line = raw.strip()
         # Failed units are prefixed with a bullet glyph ("● name.service ...").
@@ -204,9 +206,18 @@ def systemd_units():
             continue
         name, load, active, sub = p[0], p[1], p[2], p[3]
         desc = p[4].strip() if len(p) > 4 else ""
-        if UNIT_FILTER.search(name):
-            units.append({"name": name, "load": load, "state": active, "sub": sub, "desc": desc})
-    units.sort(key=lambda u: u["name"])
+        if pattern.search(name):
+            units.append({"name": name, "load": load, "state": active, "sub": sub, "desc": desc,
+                          "scope": scope})
+    return units
+
+
+def systemd_units():
+    units = _list_units(sh("systemctl --user list-units --all --no-legend --type=service,timer 2>/dev/null"),
+                        UNIT_FILTER, "user")
+    units += _list_units(sh("systemctl list-units --all --no-legend --type=service,timer 2>/dev/null"),
+                         SYSTEM_UNIT_FILTER, "system")
+    units.sort(key=lambda u: (u["name"], u["scope"]))
     return units
 
 

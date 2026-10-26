@@ -146,7 +146,8 @@
     "rules": [
       { "id": "host-down", "type": "host", "state": "unreachable", "severity": "critical" },
       { "id": "host-offline", "type": "offline", "hosts": ["hermes"], "severity": "critical" },
-      { "id": "svc-failed", "type": "service", "state": "failed", "severity": "warning" },
+      { "id": "backup-failed", "type": "service", "state": "failed", "match": "^restic-", "severity": "critical", "_comment": "restic units on acer and hermes (user and system); critical, so Discord hears about them. restic-peer-sync failed 8 days unnoticed as a warning (2026-10-18..25)" },
+      { "id": "svc-failed", "type": "service", "state": "failed", "exclude": "^restic-", "severity": "warning" },
       { "id": "disk-high", "type": "disk", "threshold": 90, "severity": "critical" },
       { "id": "mem-high", "type": "mem", "threshold": 90, "severity": "warning" },
       { "id": "load-high", "type": "load", "threshold": null, "severity": "warning" },

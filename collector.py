@@ -78,6 +78,12 @@ def validate_config(cfg=None):
     for i, r in enumerate((cfg.get("alerts") or {}).get("rules", [])):
         if not r.get("type"):
             problems.append(f"alerts.rules[{i}]: missing 'type'")
+        for key in ("match", "exclude"):
+            if key in r:
+                try:
+                    re.compile(r[key])
+                except (re.error, TypeError):
+                    problems.append(f"alerts.rules[{i}]: '{key}' is not a valid regex")
     hi = cfg.get("home_internet") or {}
     hi_hosts = list(hi.get("hosts", []))
     if "local_host" in hi:

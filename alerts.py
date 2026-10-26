@@ -28,6 +28,7 @@ way.
 
 import json
 import os
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -94,6 +95,16 @@ def _alert_facts_unknown(alert, h):
         return False
     h = h if isinstance(h, dict) else {}
     return _tailnet_facts_unknown(t, h.get("tailnet"))
+
+
+def _unit_pattern(value):
+    """A rule's unit-name regex, or None when unset or invalid (validate_config reports it)."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return re.compile(value)
+    except re.error:
+        return None
 
 
 def _str_list(value):
@@ -196,7 +207,13 @@ def _evaluate_host(host, h, rules, now=None):
                                "message": f"{host} {problem} (still reachable over Tailscale)"})
         elif t == "service":
             state = rule.get("state", "failed")
+            # Optional unit-name patterns: backup units get their own critical rule, so the
+            # generic warning skips them and nothing alerts twice.
+            match, exclude = _unit_pattern(rule.get("match")), _unit_pattern(rule.get("exclude"))
             for u in (h.get("services") or []):
+                name = u.get("name") or ""
+                if (match and not match.search(name)) or (exclude and exclude.search(name)):
+                    continue
                 if u.get("state") == state:
                     alerts.append({"host": host, "rule": rule.get("id", "svc-failed"),
                                    "severity": sev, "subject": u.get("name"),
