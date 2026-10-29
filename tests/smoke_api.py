@@ -52,7 +52,7 @@ def main():
     # 4. control: safe read-only probes
     for host, action in (("hermes", "hermes-probe-gateway"),
                          ("acer", "acer-probe-gateway"),
-                         ("macbook", "macbook-openclaw-status")):
+                         ("macbook", "macbook-ollama-status")):
         code, body = post("/api/control", {"host": host, "action_id": action})
         res = json.loads(body)
         assert res["ok"], (host, action, res)

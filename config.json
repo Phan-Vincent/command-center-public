@@ -11,23 +11,18 @@
       "projects": [
         { "name": "Reel Clipper", "path": "~/Reel Clipper", "note": "Docker + Python video app" },
         { "name": "Bodybuilding Auditor", "path": "~/Privacy-First-LLM-Driven-Bodybuilding-Auditor", "note": "Python audit pipeline" },
-        { "name": "openclaw", "path": "~/openclaw", "note": "OpenClaw runtime + workspace" },
-        { "name": "openclaw-source", "path": "~/openclaw-source", "note": "OpenClaw source checkout" },
         { "name": "pinokio", "path": "~/pinokio", "note": "1-click app launcher" },
         { "name": "acer-repo-rescue", "path": "~/acer-repo-rescue", "note": "restic repo rescue copy" }
       ],
       "agents": [
-        { "name": "openclaw gateway", "match": "openclaw", "port": 18789, "note": "local OpenClaw daemon" },
         { "name": "ollama", "match": "ollama", "port": 11434, "note": "local LLM server" },
         { "name": "kimi-webbridge", "match": "kimi-webbridge", "port": 10086, "note": "browser automation bridge" },
         { "name": "kimi app", "match": "Kimi", "port": 51454, "note": "Kimi desktop app" }
       ],
       "links": [
-        { "label": "Ollama API", "url": "http://127.0.0.1:11434", "reach": "local" },
-        { "label": "OpenClaw gateway", "url": "http://127.0.0.1:18789", "reach": "local" }
+        { "label": "Ollama API", "url": "http://127.0.0.1:11434", "reach": "local" }
       ],
       "actions": [
-        { "id": "macbook-openclaw-status", "label": "OpenClaw gateway status", "cmd": "pgrep -fl openclaw | head -5" },
         { "id": "macbook-ollama-status", "label": "Ollama status", "cmd": "pgrep -fl ollama | head -5" }
       ],
       "exec": [
