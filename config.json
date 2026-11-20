@@ -43,7 +43,7 @@
         { "name": "bezos-yacht-tracker-public", "path": "~/projects/bezos-yacht-tracker-public", "note": "public static map site" },
         { "name": "pokemon-scanner", "path": "~/projects/pokemon-scanner", "note": "scanner repo + skill" },
         { "name": "incogni-clone", "path": "~/projects/incogni-clone", "note": "incogni API clone" },
-        { "name": "hermes scripts", "path": "~/.hermes/scripts", "note": "pokemon PSA pipeline + bezos scripts" },
+        { "name": "hermes scripts", "path": "~/.hermes/scripts", "note": "pokemon PSA pipeline (old bezos scripts in .archive/)" },
         { "name": "cyber-intern-pipeline", "path": "~/cyber-intern-pipeline", "note": "JSearch daily scan" },
         { "name": "broker_automation", "path": "~/.broker_automation", "note": "broker scheduler + reports" }
       ],
