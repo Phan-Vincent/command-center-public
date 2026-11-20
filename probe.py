@@ -45,8 +45,14 @@ HOST_EXTRAS = {
     },
 }
 
+# The timed TCGCSV sync is a oneshot: a successful run leaves it inactive, so it cannot be
+# part of pokemon_scanner.services (which alerts on anything not active). Collect it here,
+# bounded to its own two units, so the generic svc-failed warning sees a failed run; every
+# other Pokémon unit stays with the scanner's own panel.
 UNIT_FILTER = re.compile(
-    r"(hermes|ngrok|discord|bezos|kimi|restic|kalshi|crypto|openclaw|homelab)", re.IGNORECASE
+    r"(hermes|ngrok|discord|bezos|kimi|restic|kalshi|crypto|openclaw|homelab)"
+    r"|^pokemon-tcgcsv-sync\.(?:service|timer)$",
+    re.IGNORECASE,
 )
 # The off-site copies (restic-b2-copy, restic-append-*, restic-wekan) and homelab-container-status
 # run as system units, which `systemctl --user` never lists; reading them needs no root.

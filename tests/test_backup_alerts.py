@@ -22,6 +22,8 @@ USER_UNITS = """\
 ● restic-acer-config.service      loaded failed   failed  Back up acer config
   homelab-health.service          loaded inactive dead    Homelab health check
   pokemon-tcgcsv-sync.service     loaded failed   failed  Sync TCGplayer prices
+  pokemon-tcgcsv-sync.timer       loaded active   waiting Daily TCGplayer sync
+  pokemon-scanner.service         loaded inactive dead    Pokémon scanner (owns its own panel)
 """
 SYSTEM_UNITS = """\
 ● restic-b2-copy.service          loaded failed   failed  Copy restic repos to B2
@@ -50,8 +52,46 @@ class ProbeUnitsTests(unittest.TestCase):
         names = {u["name"] for u in probe.systemd_units() if u["scope"] == "system"}
         self.assertNotIn("dpkg-db-backup.service", names)
         self.assertNotIn("hermes-gateway.service", names)
-        # Pokémon units stay with the scanner's own panel, as before.
-        self.assertNotIn("pokemon-tcgcsv-sync.service", {u["name"] for u in probe.systemd_units()})
+        # The TCGCSV sync and other Pokémon units are user units; system scope is unchanged.
+        self.assertNotIn("pokemon-tcgcsv-sync.service", names)
+        self.assertNotIn("pokemon-scanner.service", names)
+
+    def test_tcgcsv_sync_units_are_collected_once_in_user_scope(self):
+        units = [(u["name"], u["scope"]) for u in probe.systemd_units()]
+        self.assertEqual(units.count(("pokemon-tcgcsv-sync.service", "user")), 1)
+        self.assertEqual(units.count(("pokemon-tcgcsv-sync.timer", "user")), 1)
+        # Only the bounded TCGCSV pair joins the generic collection.
+        self.assertNotIn(("pokemon-scanner.service", "user"), units)
+
+
+class TcgcsvSyncAlertTests(unittest.TestCase):
+    """End-to-end: systemd fixture -> probe.systemd_units() -> svc-failed warning."""
+
+    def setUp(self):
+        original = probe.sh
+        self.addCleanup(setattr, probe, "sh", original)
+        probe.sh = lambda cmd, *a, **k: USER_UNITS if "--user" in cmd else SYSTEM_UNITS
+        self.rules = collector.load_config()["alerts"]["rules"]
+
+    def evaluate(self, units):
+        h = {"reachable": True, "stale": False, "services": units}
+        return alerts._evaluate_host("hermes", h, self.rules)
+
+    def test_failed_oneshot_warns_once_with_svc_failed(self):
+        found = [a for a in self.evaluate(probe.systemd_units())
+                 if a.get("subject") == "pokemon-tcgcsv-sync.service"]
+        self.assertEqual([(a["rule"], a["severity"]) for a in found],
+                         [("svc-failed", "warning")])
+        self.assertEqual(found[0]["message"], "hermes: pokemon-tcgcsv-sync.service is failed")
+
+    def test_healthy_idle_oneshot_does_not_warn(self):
+        units = probe.systemd_units()
+        for u in units:
+            if u["name"] == "pokemon-tcgcsv-sync.service":
+                u["state"] = "inactive"  # a successful oneshot exits here
+        found = [a for a in self.evaluate(units)
+                 if a.get("subject") == "pokemon-tcgcsv-sync.service"]
+        self.assertEqual(found, [])
 
 
 class BackupAlertTests(unittest.TestCase):
