@@ -17,6 +17,7 @@ METRICS = {
     "mem_used_gb", "mem_total_gb",
     "disk_use_pct", "uptime_secs", "failed_services",
 }
+DISK_DAILY_RETENTION_DAYS = 90
 
 
 def _conn():
@@ -34,6 +35,16 @@ def _conn():
         )
     """)
     c.execute("CREATE INDEX IF NOT EXISTS idx_samples_host_ts ON samples(host, ts)")
+    # samples keeps only a day; the disk forecast needs weeks, so each host's daily
+    # peak disk use is kept separately (one row per host per UTC day).
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS disk_daily (
+            host TEXT NOT NULL,
+            day TEXT NOT NULL,
+            use_pct REAL NOT NULL,
+            PRIMARY KEY (host, day)
+        )
+    """)
     return c
 
 
@@ -41,7 +52,9 @@ def record(status, cfg=None):
     """Persist one sample per host from a status snapshot."""
     retention_hours = (cfg or {}).get("server", {}).get("metrics_retention_hours", 24)
     now = time.time()
+    day = time.strftime("%Y-%m-%d", time.gmtime(now))
     rows = []
+    disk_rows = []
     for host, h in status.get("hosts", {}).items():
         load = h.get("loadavg") or []
         mem = h.get("mem") or {}
@@ -56,6 +69,8 @@ def record(status, cfg=None):
             disk.get("use_pct"), h.get("uptime_secs"),
             failed, 1 if h.get("reachable") else 0,
         ))
+        if h.get("reachable") and not h.get("stale") and isinstance(disk.get("use_pct"), (int, float)):
+            disk_rows.append((host, day, disk["use_pct"]))
     with _LOCK:
         c = _conn()
         try:
@@ -64,9 +79,28 @@ def record(status, cfg=None):
                 " mem_total_gb, disk_use_pct, uptime_secs, failed_services, reachable)"
                 " VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows)
             c.execute("DELETE FROM samples WHERE ts < ?", (now - retention_hours * 3600,))
+            c.executemany(
+                "INSERT INTO disk_daily (host, day, use_pct) VALUES (?,?,?)"
+                " ON CONFLICT(host, day) DO UPDATE SET use_pct = max(use_pct, excluded.use_pct)",
+                disk_rows)
+            c.execute("DELETE FROM disk_daily WHERE day < ?",
+                      (time.strftime("%Y-%m-%d", time.gmtime(now - DISK_DAILY_RETENTION_DAYS * 86400)),))
             c.commit()
         finally:
             c.close()
+
+
+def disk_daily(host, days=DISK_DAILY_RETENTION_DAYS):
+    """Return [{"day": "YYYY-MM-DD", "use_pct": peak}, ...] oldest-first for a host."""
+    c = _conn()
+    try:
+        rows = c.execute(
+            "SELECT day, use_pct FROM disk_daily WHERE host=? ORDER BY day DESC LIMIT ?",
+            (host, max(1, int(days)))).fetchall()
+    finally:
+        c.close()
+    rows.reverse()
+    return [{"day": r[0], "use_pct": r[1]} for r in rows]
 
 
 def series(host, metric, limit=120):

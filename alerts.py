@@ -171,6 +171,41 @@ def _parse_ts(value):
     return parsed.astimezone(timezone.utc)
 
 
+def _disk_days_left(history, current, target, window_days, min_days):
+    """Days until disk use reaches target on a least-squares trend, or None.
+
+    history is metrics.disk_daily's daily peaks; today's live value replaces
+    today's (possibly partial) row. None when there are too few days, the disk
+    isn't growing, or it is already past the target (disk-high covers that).
+    """
+    points = {}
+    for row in history if isinstance(history, list) else []:
+        if not isinstance(row, dict):
+            continue
+        pct = _num(row.get("use_pct"))
+        try:
+            day = datetime.strptime(str(row.get("day")), "%Y-%m-%d").toordinal()
+        except ValueError:
+            continue
+        if pct is not None:
+            points[day] = pct
+    today = datetime.now(timezone.utc).toordinal()
+    points[today] = current
+    points = {d: v for d, v in points.items() if d > today - window_days}
+    if len(points) < min_days or current >= target:
+        return None
+    n = len(points)
+    mean_x = sum(points) / n
+    mean_y = sum(points.values()) / n
+    var = sum((x - mean_x) ** 2 for x in points)
+    if not var:
+        return None
+    slope = sum((x - mean_x) * (y - mean_y) for x, y in points.items()) / var
+    if slope < 0.05:  # under 0.05 points a day: flat, or shrinking after a cleanup
+        return None
+    return (target - current) / slope, slope
+
+
 def _evaluate_host(host, h, rules, now=None):
     alerts = []
     now = time.time() if now is None else now
@@ -225,6 +260,21 @@ def _evaluate_host(host, h, rules, now=None):
             if pct is not None and thr is not None and pct >= thr:
                 alerts.append({"host": host, "rule": rule.get("id", "disk-high"),
                                "severity": sev, "message": f"{host}: disk {pct:.0f}% (≥ {thr:.0f}%)"})
+        elif t == "disk_forecast":
+            pct = _num((h.get("disk") or [{}])[0].get("use_pct"))
+            target = _num(rule.get("target_pct", 95))
+            days = _num(rule.get("days", 21))
+            if pct is None or target is None or days is None:
+                continue
+            forecast = _disk_days_left(h.get("disk_history"), pct, target,
+                                       int(_num(rule.get("window_days", 14)) or 14),
+                                       int(_num(rule.get("min_days", 7)) or 7))
+            if forecast and forecast[0] <= days:
+                days_left, slope = forecast
+                alerts.append({"host": host, "rule": rule.get("id", "disk-forecast"),
+                               "severity": sev,
+                               "message": f"{host}: disk {pct:.0f}% and growing {slope:.1f} points/day; "
+                                          f"about {days_left:.0f} days to {target:.0f}%"})
         elif t == "mem":
             mem = h.get("mem") or {}
             total = _num(mem.get("total_gb"))

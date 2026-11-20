@@ -132,6 +132,11 @@ def refresh_status(force=False, cfg=None):
                 fresh["home_internet"] = home_internet.update(fresh, cfg)
             except Exception as e:  # noqa: BLE001
                 print(f"[home_internet] {e}", flush=True)
+            for host, h in (fresh.get("hosts") or {}).items():
+                try:
+                    h["disk_history"] = metrics.disk_daily(host)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[metrics] disk history for {host}: {e}", flush=True)
             active = _evaluate_alerts(fresh, cfg)
             fresh["summary"] = _summarize(fresh, active)
             fresh["alerts"] = active
